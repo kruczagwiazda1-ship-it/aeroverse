@@ -53,7 +53,9 @@ CXXFLAGS	:= $(CFLAGS)
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-g $(ARCH) $(RPXSPECS) -Wl,-Map,$(notdir $*.map)
 
-LIBS	:= -lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lz -lwut
+# curl's dependencies (brotli always; others only if installed)
+CURL_EXTRA	:= $(foreach l,nghttp2 zstd,$(if $(wildcard $(foreach d,$(PORTLIBS),$(d)/lib/lib$(l).a)),-l$(l)))
+LIBS	:= -Wl,--start-group -lcurl $(CURL_EXTRA) -lbrotlidec -lbrotlicommon -lmbedtls -lmbedx509 -lmbedcrypto -lz -Wl,--end-group -lwut
 
 #-------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level
