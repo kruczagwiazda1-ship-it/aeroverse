@@ -12,8 +12,19 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Wii U libraries
         run: |
-          dkp-pacman -Sy --noconfirm
-          dkp-pacman -S --needed --noconfirm wiiu-dev wiiu-curl
+          for i in 1 2 3 4 5 6; do
+            echo "Attempt $i"
+            if dkp-pacman -Sy --noconfirm && dkp-pacman -S --needed --noconfirm wiiu-dev wiiu-curl; then
+              exit 0
+            fi
+            sleep 30
+          done
+          exit 1
+      - name: Get CA certificates
+        run: |
+          mkdir -p data
+          curl -fsSL https://curl.se/ca/cacert.pem -o data/cacert.pem || wget -O data/cacert.pem https://curl.se/ca/cacert.pem
+          ls -la data
       - name: Build
         run: make
       - name: Upload build
