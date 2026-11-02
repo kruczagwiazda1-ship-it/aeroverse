@@ -57,6 +57,7 @@ static void plat_present(const Cv *top, const Cv *bot) {
   blit_screen(GFX_TOP, top); blit_screen(GFX_BOTTOM, bot);
   gfxFlushBuffers(); gfxSwapBuffers(); gspWaitForVBlank();
 }
+static void plat_vsync(void) { gspWaitForVBlank(); }
 /* the system keyboard; returns 1 when the person pressed OK */
 static int plat_keyboard(const char *hint, const char *init, char *out, int max, int password, int multiline) {
   SwkbdState sw;
@@ -78,10 +79,13 @@ typedef LightLock Mx;
 static void mx_init(Mx *m) { LightLock_Init(m); }
 static void mx_lock(Mx *m) { LightLock_Lock(m); }
 static void mx_unlock(Mx *m) { LightLock_Unlock(m); }
+static Thread thr[4]; static int thrN;
 static void thread_start(void (*fn)(void *), int stack) {
   s32 prio = 0x30; svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
-  threadCreate(fn, NULL, (size_t)stack, prio + 1, -2, true);
+  if (thrN < 4) { thr[thrN] = threadCreate(fn, NULL, (size_t)stack, prio + 1, -2, false); if (thr[thrN]) thrN++; }
 }
+/* wait for the network threads before closing sockets (otherwise the 3DS shows an exception screen on exit) */
+static void threads_join(void) { for (int i = 0; i < thrN; i++) { threadJoin(thr[i], 3000000000ULL); threadFree(thr[i]); } thrN = 0; }
 static void thread_sleep_ms(int ms) { svcSleepThread((s64)ms * 1000000LL); }
 
 #else  /* ------------------------------------------------ PC test build (SDL2): top screen above the bottom one */
@@ -161,6 +165,7 @@ static void plat_present(const Cv *top, const Cv *bot) {
   SDL_RenderPresent(hR);
   SDL_Delay(16);
 }
+static void plat_vsync(void) { SDL_Delay(16); }
 static int plat_keyboard(const char *hint, const char *init, char *out, int max, int password, int multiline) {
   (void)hint; (void)init; (void)password; (void)multiline;
   if (hsKbI < hsKbN) { snprintf(out, (size_t)max, "%s", hsKb[hsKbI++]); for (char *p = out; *p; p++) if (*p == '|') *p = '\n'; return 1; }
@@ -170,8 +175,9 @@ typedef SDL_mutex *Mx;
 static void mx_init(Mx *m) { *m = SDL_CreateMutex(); }
 static void mx_lock(Mx *m) { SDL_LockMutex(*m); }
 static void mx_unlock(Mx *m) { SDL_UnlockMutex(*m); }
-static void (*thrFn[8])(void *); static int thrN;
+static void (*thrFn[8])(void *); static int thrN; static SDL_Thread *thrH[8];
 static int thr_tramp(void *u) { thrFn[(intptr_t)u](NULL); return 0; }
-static void thread_start(void (*fn)(void *), int stack) { (void)stack; thrFn[thrN] = fn; SDL_CreateThread(thr_tramp, "t", (void *)(intptr_t)thrN); thrN++; }
+static void thread_start(void (*fn)(void *), int stack) { (void)stack; thrFn[thrN] = fn; thrH[thrN] = SDL_CreateThread(thr_tramp, "t", (void *)(intptr_t)thrN); thrN++; }
+static void threads_join(void) { for (int i = 0; i < thrN; i++) SDL_WaitThread(thrH[i], NULL); thrN = 0; }
 static void thread_sleep_ms(int ms) { SDL_Delay((Uint32)ms); }
 #endif
