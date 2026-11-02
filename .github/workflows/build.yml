@@ -1,8 +1,11 @@
-name: Build Wii U app
+name: Build Aeroverse for Wii U
 
 on:
   push:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -10,27 +13,62 @@ jobs:
     container: devkitpro/devkitppc:latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Install Wii U libraries
         run: |
           for i in 1 2 3 4 5 6; do
             echo "Attempt $i"
-            if dkp-pacman -Sy --noconfirm && dkp-pacman -S --needed --noconfirm wiiu-dev wiiu-curl; then
+            if dkp-pacman -Sy --noconfirm && dkp-pacman -S --needed --noconfirm wiiu-dev wiiu-curl wiiu-sdl2 wiiu-sdl2_ttf; then
               exit 0
             fi
             sleep 30
           done
           exit 1
-      - name: Get CA certificates
+
+      - name: Prepare (certificates, build number)
         run: |
-          mkdir -p data
+          mkdir -p data out
           curl -fsSL https://curl.se/ca/cacert.pem -o data/cacert.pem || wget -O data/cacert.pem https://curl.se/ca/cacert.pem
-          ls -la data
-      - name: Build
-        run: make
-      - name: Upload build
+          echo "#define APP_BUILD ${{ github.run_number }}" > source/build_info.h
+          echo "#define UPDATE_REPO \"${{ github.repository }}\"" >> source/build_info.h
+          cat source/build_info.h
+          ls /opt/devkitpro/portlibs/wiiu/lib /opt/devkitpro/portlibs/ppc/lib || true
+
+      - name: Build stage 1 (reading)
+        continue-on-error: true
+        run: |
+          make clean
+          make STAGE=1
+          cp aeroverse.wuhb out/aeroverse_stage1.wuhb
+
+      - name: Build stage 2 (sign in, posts, replies, Yeah)
+        continue-on-error: true
+        run: |
+          make clean
+          make STAGE=2
+          cp aeroverse.wuhb out/aeroverse_stage2.wuhb
+
+      - name: Build stage 3 (full app)
+        run: |
+          make clean
+          make STAGE=3
+          cp aeroverse.wuhb out/aeroverse_stage3.wuhb
+          cp aeroverse.wuhb out/aeroverse.wuhb
+          echo "${{ github.run_number }}" > out/version.txt
+
+      - name: Upload apps
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: wiiu_nettest
-          path: |
-            *.wuhb
-            *.rpx
+          name: aeroverse_wiiu
+          path: out/*.wuhb
+
+      - name: Publish update (the app downloads it from here)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Aeroverse for Wii U (build ${{ github.run_number }})
+          make_latest: true
+          files: |
+            out/aeroverse.wuhb
+            out/version.txt
