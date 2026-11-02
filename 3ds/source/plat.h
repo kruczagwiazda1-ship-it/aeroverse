@@ -4,7 +4,7 @@
  */
 enum { KEY_A_ = 1, KEY_B_ = 2, KEY_X_ = 4, KEY_Y_ = 8, KEY_L_ = 16, KEY_R_ = 32, KEY_UP_ = 64, KEY_DOWN_ = 128, KEY_LEFT_ = 256, KEY_RIGHT_ = 512,
        KEY_START_ = 1024, KEY_SELECT_ = 2048, KEY_ZL_ = 4096, KEY_ZR_ = 8192 };
-typedef struct { uint32_t down, held; int touch, tx, ty; float cy; } Input;   /* cy: circle pad y (-1..1) */
+typedef struct { uint32_t down, held; int touch, tx, ty; float cy, csx, csy; } Input;   /* cy: circle pad y, csx/csy: C-stick of the New 3DS (-1..1) */
 
 #ifdef __3DS__
 #include <3ds.h>
@@ -19,11 +19,12 @@ static int plat_init(void) {
   socBuf = memalign(0x1000, 0x100000);
   if (socBuf && socInit(socBuf, 0x100000) != 0) { free(socBuf); socBuf = NULL; }
   romfsInit();
+  irrstInit();   /* C-stick and ZL/ZR on the New 3DS (fails quietly on the old 3DS) */
   osSetSpeedupEnable(true);   /* New 3DS: faster CPU */
   mkdir("sdmc:/3ds", 0777); mkdir(DATA_DIR, 0777);
   return 1;
 }
-static void plat_exit(void) { if (socBuf) socExit(); gfxExit(); }
+static void plat_exit(void) { irrstExit(); if (socBuf) socExit(); gfxExit(); }
 static int plat_running(void) { return aptMainLoop(); }
 static void plat_input(Input *in) {
   hidScanInput();
@@ -37,6 +38,13 @@ static void plat_input(Input *in) {
   if (in->touch) { touchPosition tp; hidTouchRead(&tp); in->tx = tp.px; in->ty = tp.py; }
   circlePosition cp; hidCircleRead(&cp);
   in->cy = cp.dy / 156.0f;
+  irrstScanInput();
+  circlePosition cs; irrstCstickRead(&cs);
+  in->csx = cs.dx / 146.0f; in->csy = cs.dy / 146.0f;
+  if (in->csx > 1) in->csx = 1;
+  if (in->csx < -1) in->csx = -1;
+  if (in->csy > 1) in->csy = 1;
+  if (in->csy < -1) in->csy = -1;
   if (in->cy > 1) in->cy = 1;
   if (in->cy < -1) in->cy = -1;
 }
@@ -127,7 +135,7 @@ static void plat_input(Input *in) {
   if (ks[SDL_SCANCODE_DOWN]) held |= KEY_DOWN_;
   if (ks[SDL_SCANCODE_LEFT]) held |= KEY_LEFT_;
   if (ks[SDL_SCANCODE_RIGHT]) held |= KEY_RIGHT_;
-  in->touch = 0; in->cy = 0;
+  in->touch = 0; in->cy = 0; in->csx = 0; in->csy = 0;
   int mx, my; uint32_t mb = SDL_GetMouseState(&mx, &my);
   if ((mb & SDL_BUTTON_LMASK) && my >= 240 && mx >= 40 && mx < 360) { in->touch = 1; in->tx = mx - 40; in->ty = my - 240; }
   /* scripted input for automatic tests */

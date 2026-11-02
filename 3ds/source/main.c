@@ -2035,9 +2035,14 @@ int main(int argc, char **argv) {
       s = cur();
       if (s && s->kind == S_PLAZA) {
         if (fabsf(in.cy) > 0.15f) { s->polar -= in.cy * 0.02f; s->autoRot = 0; }
+        if (fabsf(in.csx) > 0.15f) { s->az += in.csx * 0.04f; s->autoRot = 0; }      /* C-stick turns the camera on the plaza */
+        if (fabsf(in.csy) > 0.15f) { s->scroll -= in.csy * 8; dirty = 1; }
         if (in.held & KEY_LEFT_) { s->az -= 0.03f; s->autoRot = 0; }
         if (in.held & KEY_RIGHT_) { s->az += 0.03f; s->autoRot = 0; }
-      } else if (s && fabsf(in.cy) > 0.15f) { s->scroll -= in.cy * 7; dirty = 1; }
+      } else if (s) {
+        if (fabsf(in.cy) > 0.15f) { s->scroll -= in.cy * 7; dirty = 1; }
+        if (fabsf(in.csy) > 0.12f) { s->scroll -= in.csy * fabsf(in.csy) * 14; dirty = 1; }   /* New 3DS C-stick scrolls the page */
+      }
       if (s && s->more && !s->loading && s->scroll + page_h(s) > s->contentH - 60) load_screen(s, 1);
     }
     s = cur();
