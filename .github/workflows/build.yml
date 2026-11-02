@@ -2,6 +2,9 @@ name: Build Aeroverse for Wii U
 
 on:
   push:
+    paths-ignore:
+      - '3ds/**'
+      - '.github/workflows/build3ds.yml'
   workflow_dispatch:
 
 permissions:
