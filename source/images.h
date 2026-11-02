@@ -8,6 +8,7 @@
 #define STBI_ONLY_PNG
 #define STBI_ONLY_GIF
 #define STBI_NO_STDIO
+#define STBI_NO_THREAD_LOCALS   /* Wii U .rpx cannot use thread-local storage (relocation 70/72) */
 #include "stb_image.h"
 #ifdef HAVE_WEBP
 #include <webp/decode.h>

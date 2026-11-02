@@ -35,7 +35,7 @@ enum { VT_VIBE, VT_EP, VT_BASS, VT_FLUTE };
 typedef struct { float f, ph, ph2, env, amp, pan, att, dec, rel; int type, gate, age; } AVoice;
 #define NVOICE 20
 static AVoice vo[NVOICE];
-static float kickPh, kickEnv, rimEnv, rimPh, hatEnv, hatAcc, hatLp, hatHp, sfxPh, sfxEnv, sfxF, sfxF2;
+static float kickPh, kickEnv, rimEnv, rimPh, hatEnv, hatAcc, hatLp, sfxPh, sfxEnv, sfxF, sfxF2;
 static uint32_t auNoise = 12345;
 static long auSample;
 static int auTick = -1;
