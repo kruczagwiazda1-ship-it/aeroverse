@@ -14,16 +14,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Wii U libraries
+      - name: Check Wii U libraries (already inside the devkitpro/devkitppc image)
         run: |
-          for i in 1 2 3 4 5 6; do
-            echo "Attempt $i"
-            if dkp-pacman -Sy --noconfirm && dkp-pacman -S --needed --noconfirm wiiu-dev wiiu-curl wiiu-sdl2 wiiu-sdl2_ttf; then
-              exit 0
-            fi
-            sleep 30
-          done
-          exit 1
+          ls /opt/devkitpro/portlibs/wiiu/lib | grep -E "SDL2|curl" || true
+          # only if something is missing, try to download it (devkitPro sometimes blocks GitHub with 403)
+          if [ ! -f /opt/devkitpro/portlibs/wiiu/lib/libSDL2_ttf.a ] || [ ! -f /opt/devkitpro/portlibs/wiiu/lib/libcurl.a ]; then
+            dkp-pacman -Sy --noconfirm && dkp-pacman -S --needed --noconfirm wiiu-sdl2 wiiu-sdl2_ttf wiiu-curl || true
+          fi
 
       - name: Prepare (certificates, build number)
         run: |
