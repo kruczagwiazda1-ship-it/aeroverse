@@ -145,7 +145,7 @@ static void inline_rich(Runs *rs, const char *s, size_t len, RStyle st, int dept
       if (k != T_NONE) {
         add_plain(rs, s + start, i - start, &st);
         RStyle ns = st;
-        if (k == T_IMG) { RStyle is = st; is.hasColor = 1; is.color = 0x7a7a7a; runs_add(rs, "[image]", 7, &is); i += used; start = i; continue; }
+        if (k == T_IMG) { char u[200]; size_t L = used - 6 < 199 ? used - 6 : 199; memcpy(u, s + i + 5, L); u[L] = 0; if (!img_host_ok(u)) runs_add(rs, s + i, used, &st); i += used; start = i; continue; }
         if (k == T_B) ns.b = 1; else if (k == T_I) ns.i = 1; else if (k == T_U) ns.u = 1; else if (k == T_S) ns.s = 1;
         if (k == T_TAG || k == T_GRAD || k == T_ITAG) {
           const char *after = s + i + used; size_t alen = len - i - used;

@@ -12,8 +12,8 @@ static float vdot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 static V3 vcross(V3 a, V3 b) { return v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x); }
 static V3 vnorm(V3 a) { float l = sqrtf(vdot(a, a)); return l > 1e-6f ? vmul(a, 1 / l) : a; }
 
-typedef struct { V3 p[3]; float uv[3][2]; uint32_t col; int16_t tex; } Tri;   /* tex = -1 none, else face texture id */
-typedef struct { Tri *t; int n, cap; } Mesh;
+typedef struct { V3 p[3]; float uv[3][2]; uint32_t col; int16_t tex; V3 n, cen; uint32_t sh[2]; } Tri;   /* tex = -1 none, else face texture id; n/cen/sh precomputed */
+typedef struct { Tri *t; int n, cap; int pre; } Mesh;
 static void mesh_add(Mesh *m, V3 a, V3 b, V3 c, uint32_t col) {
   if (m->n == m->cap) { m->cap = m->cap ? m->cap * 2 : 1024; m->t = realloc(m->t, sizeof(Tri) * (size_t)m->cap); }
   Tri *t = &m->t[m->n++]; t->p[0] = a; t->p[1] = b; t->p[2] = c; t->col = col; t->tex = -1;
@@ -86,13 +86,13 @@ static void p3_build_world(void) {
   p3_rng_state = 7;
   p3nobs = 0;
   p3obs[p3nobs++] = (Obst){ 0, 0, 4.2f }; p3obs[p3nobs++] = (Obst){ -28, 12, 9 };
-  prim_disc(m, 0, -7, 0, 520, 32, 0x5db7e6);
-  { Xf t = xf(0, -4.5f, 0, 0, 1); prim_cyl(m, &t, 58, 50, 9, 48, 0x9b7a52, 0); }
-  { Xf t = xf(0, -0.55f, 0, 0, 1); prim_cyl(m, &t, 58.6f, 58.6f, 1.2f, 48, 0x68b83a, 0); }
-  prim_disc(m, 0, 0.02f, 0, 58.6f, 48, 0x79c944);
-  prim_ring(m, 0.04f, 40, 43.5f, 48, 0xe3dfd2);
-  prim_disc(m, 0, 0.12f, 0, 15.6f, 32, 0xcfcabb);
-  prim_disc(m, 0, 0.13f, 0, 15, 32, 0xebe8de);
+  /* the sea is drawn as the background colour below the horizon (much faster than a huge disc) */
+  { Xf t = xf(0, -4.5f, 0, 0, 1); prim_cyl(m, &t, 58, 50, 9, 32, 0x9b7a52, 0); }
+  { Xf t = xf(0, -0.55f, 0, 0, 1); prim_cyl(m, &t, 58.6f, 58.6f, 1.2f, 32, 0x68b83a, 0); }
+  prim_disc(m, 0, 0.02f, 0, 58.6f, 32, 0x79c944);
+  prim_ring(m, 0.04f, 40, 43.5f, 32, 0xe3dfd2);
+  prim_disc(m, 0, 0.12f, 0, 15.6f, 20, 0xcfcabb);
+  prim_disc(m, 0, 0.13f, 0, 15, 20, 0xebe8de);
   for (int i = 0; i < 4; i++) {
     float a = i * 1.5707963f + 0.785398f, len = 28;
     Xf t = xf(sinf(a) * (len / 2 + 14), 0.05f, cosf(a) * (len / 2 + 14), a, 1);
@@ -127,9 +127,9 @@ static void p3_build_world(void) {
     static const uint32_t tint[4] = { 0x3f9f2e, 0x4cb336, 0x5bc23f, 0x38912c };
     uint32_t tc = tint[(int)(c * 4) % 4];
     uint32_t tc2 = lerp_col(tc | 0xff000000u, 0xffffffffu, 0.08f) & 0xffffff;
-    Xf t1 = xf(x, 1.1f * s, z, 0, s); prim_cyl(m, &t1, 0.28f, 0.4f, 2.2f, 6, 0x8a5a2b, 0);
-    Xf t2 = xf(x, 3.6f * s, z, 0, s); prim_cyl(m, &t2, 0, 2.2f, 3.4f, 7, tc, 1);
-    Xf t3 = xf(x, 5.4f * s, z, 0, s); prim_cyl(m, &t3, 0, 1.7f, 3.0f, 7, tc2, 1);
+    Xf t1 = xf(x, 1.1f * s, z, 0, s); prim_cyl(m, &t1, 0.28f, 0.4f, 2.2f, 4, 0x8a5a2b, 0);
+    Xf t2 = xf(x, 3.6f * s, z, 0, s); prim_cyl(m, &t2, 0, 2.2f, 3.4f, 6, tc, 0);
+    Xf t3 = xf(x, 5.4f * s, z, 0, s); prim_cyl(m, &t3, 0, 1.7f, 3.0f, 6, tc2, 0);
     if (p3nobs < 200) p3obs[p3nobs++] = (Obst){ x, z, 1.3f * s };
     nt++;
   }
@@ -141,11 +141,11 @@ static void p3_build_world(void) {
     if (p3nobs < 200) p3obs[p3nobs++] = (Obst){ x, z, 1.2f };
     float la = a + 0.3926991f, lx = sinf(la) * 14.2f, lz = cosf(la) * 14.2f;
     Xf tl = xf(lx, 2.1f, lz, 0, 1); prim_cyl(m, &tl, 0.1f, 0.14f, 4.2f, 6, 0x4a4f5c, 0);
-    Xf tg = xf(lx, 4.4f, lz, 0, 1); prim_sphere(m, &tg, 0.36f, 6, 4, 0xfff4c2);
+    Xf tg = xf(lx, 4.4f, lz, 0, 1); prim_sphere(m, &tg, 0.36f, 4, 2, 0xfff4c2);
     if (p3nobs < 200) p3obs[p3nobs++] = (Obst){ lx, lz, 0.4f };
   }
   /* clouds: one shared mesh, positions animated */
-  for (int k = 0; k < 4; k++) { Xf t = xf(k * 4 - 8, 0, 0, 0, 1); t.sc = 1; prim_sphere(&p3cloud, &t, 3 + (k % 2) * 1.5f, 6, 3, 0xffffff); }
+  for (int k = 0; k < 4; k++) { Xf t = xf(k * 4 - 8, 0, 0, 0, 1); t.sc = 1; prim_sphere(&p3cloud, &t, 3 + (k % 2) * 1.5f, 5, 3, 0xffffff); }
   for (int i = 0; i < 7; i++) p3clouds[i] = v3((p3_rnd() - 0.5f) * 220, 32 + p3_rnd() * 12, (p3_rnd() - 0.5f) * 220);
 }
 
@@ -227,37 +227,49 @@ static uint32_t p3_shade(uint32_t col, V3 n, float fogt) {
   return 0xff000000u | ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;  /* packed ARGB8888 (endian safe) */
 }
 
-typedef struct { float x, y, z, w, u, v; } SV;   /* screen vertex: x,y pixels, z = depth (1/w based), w = 1/zc */
+typedef struct { float x, y, z, w, u, v; } SV;   /* screen vertex: x,y pixels, w = 1/zc */
+/* scanline rasterizer: walks only the pixels inside the triangle, depth (1/z) and uv/w from plane equations */
 static void p3_raster(P3Buf *b, SV *a, SV *bb, SV *c, uint32_t col, int tex) {
-  float minx = fminf(a->x, fminf(bb->x, c->x)), maxx = fmaxf(a->x, fmaxf(bb->x, c->x));
-  float miny = fminf(a->y, fminf(bb->y, c->y)), maxy = fmaxf(a->y, fmaxf(bb->y, c->y));
-  int x0 = (int)floorf(minx), x1 = (int)ceilf(maxx), y0 = (int)floorf(miny), y1 = (int)ceilf(maxy);
-  if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > b->w) x1 = b->w; if (y1 > b->h) y1 = b->h;
-  if (x0 >= x1 || y0 >= y1) return;
-  float area = (bb->x - a->x) * (c->y - a->y) - (bb->y - a->y) * (c->x - a->x);
-  if (fabsf(area) < 1e-6f) return;
-  float ia = 1.0f / area;
+  float det = (bb->x - a->x) * (c->y - a->y) - (c->x - a->x) * (bb->y - a->y);
+  if (fabsf(det) < 1e-6f) return;
+  float id = 1.0f / det;
+  /* plane: v = A*x + B*y + C */
+  #define PLANE(va, vb, vc, A, B, C) do { float d1 = (vb) - (va), d2 = (vc) - (va); A = (d1 * (c->y - a->y) - d2 * (bb->y - a->y)) * id; B = (d2 * (bb->x - a->x) - d1 * (c->x - a->x)) * id; C = (va) - A * a->x - B * a->y; } while (0)
+  float wA, wB, wC; PLANE(a->w, bb->w, c->w, wA, wB, wC);
   P3Tex *T = tex >= 0 && tex < p3ntex ? &p3tex[tex] : NULL;
-  for (int y = y0; y < y1; y++) {
-    float py = y + 0.5f;
-    for (int x = x0; x < x1; x++) {
-      float px = x + 0.5f;
-      float w0 = ((bb->x - px) * (c->y - py) - (bb->y - py) * (c->x - px)) * ia;
-      float w1 = ((c->x - px) * (a->y - py) - (c->y - py) * (a->x - px)) * ia;
-      float w2 = 1 - w0 - w1;
-      if (w0 < 0 || w1 < 0 || w2 < 0) continue;
-      float iw = w0 * a->w + w1 * bb->w + w2 * c->w;   /* 1/z, bigger = closer */
-      int idx = y * b->w + x;
-      if (iw <= b->zb[idx]) continue;
-      b->zb[idx] = iw;
-      uint32_t o = col;
-      if (T) {
-        float u = (w0 * a->u * a->w + w1 * bb->u * bb->w + w2 * c->u * c->w) / iw, v = (w0 * a->v * a->w + w1 * bb->v * bb->w + w2 * c->v * c->w) / iw;
-        int tx = (int)(u * T->w), ty = (int)(v * T->h);
-        if (tx < 0) tx = 0; if (ty < 0) ty = 0; if (tx >= T->w) tx = T->w - 1; if (ty >= T->h) ty = T->h - 1;
-        o = T->px[ty * T->w + tx];
+  float uA = 0, uB = 0, uC = 0, vA = 0, vB = 0, vC = 0;
+  if (T) { PLANE(a->u * a->w, bb->u * bb->w, c->u * c->w, uA, uB, uC); PLANE(a->v * a->w, bb->v * bb->w, c->v * c->w, vA, vB, vC); }
+  #undef PLANE
+  SV *v[3] = { a, bb, c };
+  float miny = fminf(a->y, fminf(bb->y, c->y)), maxy = fmaxf(a->y, fmaxf(bb->y, c->y));
+  int y0 = (int)ceilf(miny - 0.5f), y1 = (int)floorf(maxy - 0.5f);
+  if (y0 < 0) y0 = 0; if (y1 >= b->h) y1 = b->h - 1;
+  for (int y = y0; y <= y1; y++) {
+    float py = y + 0.5f, xl = 1e9f, xr = -1e9f;
+    for (int e = 0; e < 3; e++) {
+      SV *p = v[e], *q = v[(e + 1) % 3];
+      if ((p->y <= py && q->y > py) || (q->y <= py && p->y > py)) {
+        float x = p->x + (py - p->y) * (q->x - p->x) / (q->y - p->y);
+        if (x < xl) xl = x; if (x > xr) xr = x;
       }
-      b->px[idx] = o;
+    }
+    if (xl > xr) continue;
+    int x0 = (int)ceilf(xl - 0.5f), x1 = (int)floorf(xr - 0.5f);
+    if (x0 < 0) x0 = 0; if (x1 >= b->w) x1 = b->w - 1;
+    if (x0 > x1) continue;
+    float iw = wA * (x0 + 0.5f) + wB * py + wC;
+    float *zb = b->zb + y * b->w; uint32_t *px = b->px + y * b->w;
+    if (!T) {
+      for (int x = x0; x <= x1; x++, iw += wA) if (iw > zb[x]) { zb[x] = iw; px[x] = col; }
+    } else {
+      float uw = uA * (x0 + 0.5f) + uB * py + uC, vw = vA * (x0 + 0.5f) + vB * py + vC;
+      for (int x = x0; x <= x1; x++, iw += wA, uw += uA, vw += vA) {
+        if (iw <= zb[x]) continue;
+        zb[x] = iw;
+        int tx = (int)(uw / iw * T->w), ty = (int)(vw / iw * T->h);
+        if (tx < 0) tx = 0; if (ty < 0) ty = 0; if (tx >= T->w) tx = T->w - 1; if (ty >= T->h) ty = T->h - 1;
+        px[x] = T->px[ty * T->w + tx];
+      }
     }
   }
 }
@@ -280,18 +292,42 @@ static int p3_project(V3 c, int W, int H, float *sx, float *sy) {
   return 1;
 }
 
+static void p3_precompute(Mesh *m) {
+  for (int i = 0; i < m->n; i++) {
+    Tri *t = &m->t[i];
+    t->n = vnorm(vcross(vsub(t->p[1], t->p[0]), vsub(t->p[2], t->p[0])));
+    t->cen = vmul(vadd(vadd(t->p[0], t->p[1]), t->p[2]), 1.0f / 3);
+    t->sh[0] = p3_shade(t->col, t->n, 0); t->sh[1] = p3_shade(t->col, vmul(t->n, -1), 0);
+  }
+  m->pre = 1;
+}
+static uint32_t p3_fog(uint32_t c, float fogt) {
+  if (fogt <= 0) return c;
+  int r = (c >> 16) & 255, g = (c >> 8) & 255, bl = c & 255;
+  r += (int)((0xcf - r) * fogt); g += (int)((0xee - g) * fogt); bl += (int)((0xff - bl) * fogt);
+  return 0xff000000u | (uint32_t)(r << 16 | g << 8 | bl);
+}
 static void p3_draw_mesh(P3Buf *b, const Mesh *m, V3 offset) {
   const float NEAR = 0.5f;
+  int pre = m->pre && offset.x == 0 && offset.y == 0 && offset.z == 0;
   for (int i = 0; i < m->n; i++) {
     const Tri *t = &m->t[i];
     V3 w[3] = { vadd(t->p[0], offset), vadd(t->p[1], offset), vadd(t->p[2], offset) };
-    V3 n = vnorm(vcross(vsub(w[1], w[0]), vsub(w[2], w[0])));
-    V3 cen = vmul(vadd(vadd(w[0], w[1]), w[2]), 1.0f / 3);
-    /* face the normal towards the camera for lighting (meshes are double sided) */
-    if (vdot(n, vsub(p3eye, cen)) < 0) n = vmul(n, -1);
-    float dist = sqrtf(vdot(vsub(cen, p3eye), vsub(cen, p3eye)));
-    float fogt = (dist - 160) / 320; if (fogt < 0) fogt = 0; if (fogt > 1) fogt = 1;
-    uint32_t col = p3_shade(t->col, n, fogt);
+    uint32_t col;
+    if (pre) {
+      V3 d = vsub(p3eye, t->cen);
+      float d2 = vdot(d, d), fogt = d2 > 160 * 160 ? (sqrtf(d2) - 160) / 320 : 0; if (fogt > 1) fogt = 1;
+      col = p3_fog(t->sh[vdot(t->n, d) < 0], fogt);
+      /* quick reject: behind the camera */
+      if (vdot(vsub(t->cen, p3eye), p3fw) < -12) continue;
+    } else {
+      V3 n = vnorm(vcross(vsub(w[1], w[0]), vsub(w[2], w[0])));
+      V3 cen = vmul(vadd(vadd(w[0], w[1]), w[2]), 1.0f / 3);
+      if (vdot(n, vsub(p3eye, cen)) < 0) n = vmul(n, -1);
+      float dist = sqrtf(vdot(vsub(cen, p3eye), vsub(cen, p3eye)));
+      float fogt = (dist - 160) / 320; if (fogt < 0) fogt = 0; if (fogt > 1) fogt = 1;
+      col = p3_shade(t->col, n, fogt);
+    }
     V3 c[3]; for (int k = 0; k < 3; k++) c[k] = p3_cam(w[k]);
     /* clip against the near plane (Sutherland-Hodgman, up to 4 vertices) */
     V3 poly[4]; float puv[4][2]; int np = 0;

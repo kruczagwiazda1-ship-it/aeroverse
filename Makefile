@@ -61,7 +61,12 @@ LDFLAGS	=	-g $(ARCH) $(RPXSPECS) -Wl,-Map,$(notdir $*.map)
 # optional ones are linked only if they are installed
 HAVE_LIB = $(if $(wildcard $(foreach d,$(PORTLIBS),$(d)/lib/lib$(1).a)),-l$(1))
 OPT_LIBS	:= $(foreach l,harfbuzz png16 png bz2 nghttp2 zstd,$(call HAVE_LIB,$(l)))
-LIBS	:= -Wl,--start-group -lSDL2_ttf -lSDL2 -lfreetype -lcurl $(OPT_LIBS) -lbrotlidec -lbrotlicommon -lmbedtls -lmbedx509 -lmbedcrypto -lz -lm -Wl,--end-group -lwut
+# WebP avatars: libwebp is used when it is installed (JPEG/PNG are decoded by stb_image)
+ifneq (,$(call HAVE_LIB,webp))
+IMG_LIBS	:= -lwebp $(call HAVE_LIB,sharpyuv)
+CFLAGS	+= -DHAVE_WEBP
+endif
+LIBS	:= -Wl,--start-group $(IMG_LIBS) -lSDL2_ttf -lSDL2 -lfreetype -lcurl $(OPT_LIBS) -lbrotlidec -lbrotlicommon -lmbedtls -lmbedx509 -lmbedcrypto -lz -lm -Wl,--end-group -lwut
 
 #-------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level

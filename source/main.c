@@ -9,7 +9,7 @@
 #ifndef STAGE
 #define STAGE 3
 #endif
-#define APP_VERSION "2.0"
+#define APP_VERSION "2.1"
 /* build_info.h is written by the GitHub workflow: APP_BUILD (run number) and UPDATE_REPO (owner/repo) */
 #if defined(__has_include)
 #if __has_include("build_info.h")
@@ -23,6 +23,9 @@
 #define UPDATE_REPO ""
 #endif
 #define APP_FILE "fs:/vol/external01/wiiu/apps/aeroverse.wuhb"
+#define APP_FILE2 "fs:/vol/external01/wiiu/apps/aeroverse_update.wuhb"
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -134,6 +137,7 @@ static void card(int x, int y, int w, int h);
 
 /* ------------------------------------------------------------------ text helpers */
 static long utc_now(void);
+static int img_host_ok(const char *u);
 static void parse_date_header(const char *h);
 static void fmt_ago(double ms, char *out, size_t n) {
   long now = utc_now();
@@ -377,6 +381,9 @@ static void net_poll(void) {
 }
 static int net_pending(void) { SDL_LockMutex(netMx); int p = netBusy || reqHead != reqTail; SDL_UnlockMutex(netMx); return p; }
 
+#include "images.h"
+#include "audio.h"
+
 /* error text from a JSON {"error": "..."} body */
 static void api_error(long code, const char *body, const char *err, char *out, size_t n) {
   if (err && *err) { snprintf(out, n, "No connection: %s", err); return; }
@@ -387,7 +394,7 @@ static void api_error(long code, const char *body, const char *err, char *out, s
 }
 
 /* ------------------------------------------------------------------ session / me */
-typedef struct { int id; char username[24]; char display[48]; int admin; } Me;
+typedef struct { int id; char username[24]; char display[48]; int admin; char avatar[64]; } Me;
 static Me me;
 static int meKnown;
 static char toastMsg[200]; static uint32_t toastUntil;
@@ -401,7 +408,17 @@ static void update_check_cb(int serial, long code, const char *body, const char 
   int b = atoi(body);
   if (b > APP_BUILD && APP_BUILD > 0) { updateBuild = b; toast("A new version of Aeroverse is available! See Home."); }
 }
+/* after an update there can be two copies (aeroverse.wuhb and aeroverse_update.wuhb): delete the older one.
+   The copy that is running is locked, so it can never be deleted by mistake. */
+static void update_cleanup(void) {
+  remove(APP_FILE ".part");
+  struct stat a, b;
+  if (stat(APP_FILE, &a) == 0 && stat(APP_FILE2, &b) == 0) {
+    if (a.st_mtime <= b.st_mtime) remove(APP_FILE); else remove(APP_FILE2);
+  }
+}
 static void update_check(void) {
+  update_cleanup();
   if (!UPDATE_REPO[0]) return;
   net_send("GET", "https://github.com/" UPDATE_REPO "/releases/latest/download/version.txt", NULL, update_check_cb, 0, 0);
 }
@@ -416,10 +433,16 @@ static void update_dl_cb(int serial, long code, const char *body, const char *er
   size_t w = fwrite(body, 1, lastLen, f);
   int ok = fclose(f) == 0 && w == lastLen;
   if (!ok) { remove(APP_FILE ".part"); toast("Update failed: SD card full?"); return; }
-  remove(APP_FILE);
-  if (rename(APP_FILE ".part", APP_FILE)) { toast("Update failed: cannot replace the app file."); return; }
-  updateBuild = -1;
-  toast("Updated! Press HOME, close Aeroverse and start it again.");
+  /* the running app file is locked by the system, so the update goes into the other of two file names;
+     on the next start the older copy is removed (see update_cleanup) */
+  remove(APP_FILE2 ".tmp");
+  if (remove(APP_FILE) == 0 && rename(APP_FILE ".part", APP_FILE) == 0) { updateBuild = -1; toast("Updated! Press HOME, close Aeroverse and start it again."); return; }
+  if (remove(APP_FILE2) == 0 || access(APP_FILE2, F_OK) != 0) {
+    if (rename(APP_FILE ".part", APP_FILE2) == 0) { updateBuild = -1; toast("Updated! Close Aeroverse (HOME), restart the console and open the new Aeroverse icon."); return; }
+  }
+  /* we are running from the second name: put the update back into the first one */
+  remove(APP_FILE2 ".part");
+  toast("Update failed: cannot replace the app file. Copy it from GitHub by hand this time.");
 }
 static void update_start(void) {
   if (updating || updateBuild <= 0) return;
@@ -460,6 +483,7 @@ static void me_cb(int serial, long code, const char *body, const char *err, int 
     if ((v = cJSON_GetObjectItem(u, "username")) && cJSON_IsString(v)) snprintf(me.username, sizeof me.username, "%s", v->valuestring);
     if ((v = cJSON_GetObjectItem(u, "display")) && cJSON_IsString(v)) snprintf(me.display, sizeof me.display, "%s", v->valuestring);
     if ((v = cJSON_GetObjectItem(u, "is_admin"))) me.admin = cJSON_IsTrue(v) || (cJSON_IsNumber(v) && v->valueint);
+    if ((v = cJSON_GetObjectItem(u, "avatar")) && cJSON_IsString(v)) snprintf(me.avatar, sizeof me.avatar, "%s", v->valuestring);
   } else if (sessionTok[0]) forget_token();
   meKnown = 1;
   cJSON_Delete(j);
@@ -473,7 +497,8 @@ enum { A_NONE, A_WRITE_POST, A_WRITE_REPLY, A_SIGNIN, A_SIGNOUT, A_SEND, A_DRAW,
 typedef struct Item {
   int kind, act, id, yeahs, replies, mine, posts, sel_ok, icon;
   double created, lastPost;
-  char *name, *user, *cname, *cid, *body, *drawing, *title, *style, *msg, *age;
+  char *name, *user, *cname, *cid, *body, *drawing, *title, *style, *msg, *age, *avatar;
+  char *pics[4]; int npics, picH[4];
   Tex tName, tBody, tTitle;
   SDL_Texture *rich; int rw, rh, richH, richClip;   /* rendered post body (4px margin around) */
   SDL_Texture *dr[4]; int ndr, wig;
@@ -483,7 +508,8 @@ typedef struct Item {
 } Item;
 
 static void item_free(Item *it) {
-  free(it->name); free(it->user); free(it->cname); free(it->cid); free(it->body); free(it->drawing); free(it->title); free(it->style); free(it->msg); free(it->age);
+  free(it->name); free(it->user); free(it->cname); free(it->cid); free(it->body); free(it->drawing); free(it->title); free(it->style); free(it->msg); free(it->age); free(it->avatar);
+  for (int i = 0; i < it->npics; i++) free(it->pics[i]);
   tex_free(&it->tName); tex_free(&it->tBody); tex_free(&it->tTitle);
   if (it->rich) SDL_DestroyTexture(it->rich);
   if (it->bgTex) SDL_DestroyTexture(it->bgTex);
@@ -505,7 +531,7 @@ static void item_drawing(Item *it, const char *code) {
 
 /* ------------------------------------------------------------------ screens */
 enum { S_FEED, S_COMMS, S_COMM, S_POST, S_WIGGLE, S_WENTRY, S_COMPOSE, S_LOGIN, S_PLAZA, S_GAMES, S_USER, S_STUB };
-typedef struct { char *name, *user; int tags, shirt, tex; Walker w; } Person;
+typedef struct { char *name, *user, *avatar; int tags, shirt, tex, faceDone; Walker w; } Person;
 typedef struct Screen {
   int kind, serial;
   Item *it; int n, cap;
@@ -558,7 +584,7 @@ static Item *add_side(Screen *s, int kind) { Item *it = new_item(&s->side, &s->n
 static void clear_items(Screen *s, int from) { for (int i = from; i < s->n; i++) item_free(&s->it[i]); if (from < s->n) s->n = from; }
 static void clear_side(Screen *s) { for (int i = 0; i < s->nside; i++) item_free(&s->side[i]); s->nside = 0; }
 static Screen *new_screen(int kind) { Screen *s = calloc(1, sizeof(Screen)); s->kind = kind; s->serial = serialCounter++; s->az = 0.6f; s->polar = 1.0f; s->dist = 64; s->autoRot = 1; return s; }
-static void free_people(Screen *s) { for (int i = 0; i < s->np; i++) { free(s->pp[i].name); free(s->pp[i].user); } free(s->pp); s->pp = NULL; s->np = 0; }
+static void free_people(Screen *s) { for (int i = 0; i < s->np; i++) { free(s->pp[i].name); free(s->pp[i].user); free(s->pp[i].avatar); } free(s->pp); s->pp = NULL; s->np = 0; }
 static void free_screen(Screen *s) { if (!s) return; clear_items(s, 0); clear_side(s); free(s->it); free(s->side); free(s->draw); free_people(s); if (s->parent) { item_free(s->parent); free(s->parent); } free(s); }
 static void push(Screen *s) { if (depth < MAXS) stack[depth++] = s; else free_screen(s); }
 static void pop(void) {
@@ -586,6 +612,15 @@ static void fill_post(Item *it, cJSON *p) {
   it->body = xstrdup(jstr(p, "body"));
   it->drawing = xstrdup(jstr(p, "drawing"));
   it->style = xstrdup(jstr(p, "style"));
+  it->avatar = xstrdup(jstr(a, "avatar"));
+  /* [img=https://...] pictures from allowed hosts are shown under the text */
+  const char *b = it->body;
+  while (b && (b = strstr(b, "[img=")) && it->npics < 4) {
+    const char *e = strchr(b, ']'); if (!e) break;
+    size_t L = (size_t)(e - b - 5);
+    if (L < 190) { char u[200]; memcpy(u, b + 5, L); u[L] = 0; if (img_host_ok(u)) { it->picH[it->npics] = 240; it->pics[it->npics++] = xstrdup(u); } }
+    b = e + 1;
+  }
 }
 
 /* post card geometry (website .post scaled x1.4) */
@@ -613,7 +648,8 @@ static void build_item(Item *it) {
     build_rich(it, inner, S14(16), full ? 0 : S14(16) * 1.45f * 9);
     item_drawing(it, it->drawing);
     if (it->ndr) { it->dw = full ? 640 : 480; it->dh = full ? 360 : 270; if (it->dw > inner) { it->dw = 320; it->dh = 180; } }
-    int bh = BUB_PY + 30 + 4 + 25 + (it->rich ? 8 + it->richH : 0) + (it->ndr ? 10 + it->dh : 0) + 14 + 44 + BUB_PY;
+    int ph = 0; for (int k = 0; k < it->npics; k++) ph += 10 + it->picH[k];
+    int bh = BUB_PY + 30 + 4 + 25 + (it->rich ? 8 + it->richH : 0) + ph + (it->ndr ? 10 + it->dh : 0) + 14 + 44 + BUB_PY;
     it->h = PC_PAD + (bh > PC_AV + 4 ? bh : PC_AV + 4) + PC_PAD;
   } else if (rep) {
     int inner = it->w - 14 - 53 - 14 - 14;
@@ -758,6 +794,7 @@ static void drawings_cb(int serial, long code, const char *body, const char *err
     const char *disp = jstr(a, "display"), *un = jstr(a, "username");
     it->name = xstrdup(disp && *disp ? disp : un); it->user = xstrdup(un);
     it->cname = xstrdup(cJSON_IsObject(c) ? jstr(c, "name") : NULL);
+    it->avatar = xstrdup(jstr(a, "avatar"));
     build_item(it);
     it->sel_ok = 0;
     n++;
@@ -786,6 +823,7 @@ static void comms_cb(int serial, long code, const char *body, const char *err, i
     it->name = xstrdup(jstr(c, "name"));
     it->body = xstrdup(jstr(c, "description"));
     it->msg = xstrdup(jstr(c, "message"));
+    it->avatar = xstrdup(jstr(c, "thumb"));
     it->age = xstrdup(age ? age : "all");
     it->posts = (int)jnum(c, "posts");
     build_item(it);
@@ -884,6 +922,8 @@ static void user_cb(int serial, long code, const char *body, const char *err, in
   it->body = xstrdup(jstr(u, "bio"));
   it->posts = (int)jnum(u, "posts");
   it->created = jnum(u, "created_at");
+  it->avatar = xstrdup(jstr(u, "avatar"));
+  it->icon = (int)jnum(u, "shirt");
   build_item(it);
 #if STAGE >= 2
   if (me.id && it->user && !strcmp(it->user, me.username)) {
@@ -931,6 +971,7 @@ static void plaza_cb(int serial, long code, const char *body, const char *err, i
     q->name = xstrdup(disp && *disp ? disp : jstr(p, "username"));
     q->user = xstrdup(jstr(p, "username"));
     q->shirt = (int)jnum(p, "shirt");
+    q->avatar = xstrdup(jstr(p, "avatar"));
     cJSON *t, *tags = cJSON_GetObjectItem(p, "tags");
     cJSON_ArrayForEach(t, tags) if (cJSON_IsString(t)) {
       if (!strcmp(t->valuestring, "popular")) q->tags |= 1;
@@ -987,7 +1028,7 @@ static void add_header_items(Screen *s) {
   if (s->kind == S_STUB) add_empty(s, "Signing in comes in the next update of the app.");
   if (s->kind == S_COMM) {
     Item *h = add_item(s, K_CHEAD); h->name = xstrdup(s->cname); h->body = xstrdup(s->text); h->age = xstrdup(s->text2[0] ? s->text2 : "all");
-    h->msg = xstrdup(s->parent ? s->parent->msg : NULL); build_item(h);
+    h->msg = xstrdup(s->parent ? s->parent->msg : NULL); h->avatar = xstrdup(s->parent ? s->parent->avatar : NULL); build_item(h);
     Item *pr = add_item(s, K_PROMPT);
     char t[160];
 #if STAGE >= 2
@@ -1065,6 +1106,7 @@ static Screen *make_profile_root(void);
 static void go_tab(int t) {
   if (t < 0) t = 0;
   if (t >= NTABS) t = NTABS - 1;
+  sfx(3);
   while (depth > 1) pop();
   depth = 0;
   curTab = t;
@@ -1460,6 +1502,28 @@ static void ed_cancel(void) {
   ed_close();
 }
 
+/* Ultra Wiggle uiChaos(): panels are drawn into a texture and then shown rotated and colour shifted */
+static SDL_Texture *panelTex; static int panelOn;
+static void panel_begin(void) {
+  if (!(ed.ultra && ed.started)) { panelOn = 0; return; }
+  if (!panelTex) { panelTex = SDL_CreateTexture(R, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET, SW, SH); if (panelTex) SDL_SetTextureBlendMode(panelTex, SDL_BLENDMODE_BLEND); }
+  if (!panelTex || SDL_SetRenderTarget(R, panelTex) != 0) { panelOn = 0; return; }
+  panelOn = 1;
+  SDL_SetRenderDrawColor(R, 0, 0, 0, 0); SDL_RenderClear(R);
+  SDL_SetRenderDrawBlendMode(R, SDL_BLENDMODE_BLEND);
+}
+static void panel_end(int x, int y, int w, int h, int idx) {
+  if (!panelOn) return;
+  SDL_SetRenderTarget(R, NULL);
+  float hh = fmodf(ed.uiHue + idx * 70, 360) / 60.0f; int i = (int)hh; float f = hh - i;
+  float rgb[6][3] = { { 1, f, 0 }, { 1 - f, 1, 0 }, { 0, 1, f }, { 0, 1 - f, 1 }, { f, 0, 1 }, { 1, 0, 1 - f } };
+  float *c = rgb[i % 6];
+  SDL_SetTextureColorMod(panelTex, (Uint8)(150 + 105 * c[0]), (Uint8)(150 + 105 * c[1]), (Uint8)(150 + 105 * c[2]));
+  SDL_Rect r = { x, y, w, h };
+  SDL_RenderCopyEx(R, panelTex, &r, &r, ed.uiRot[idx], NULL, SDL_FLIP_NONE);
+  SDL_SetTextureColorMod(panelTex, 255, 255, 255);
+  panelOn = 0;
+}
 static void ed_draw(void) {
   uint32_t now = SDL_GetTicks();
   /* timers: live wiggle every 50 ms, preview frames every 125 ms, chaos */
@@ -1474,15 +1538,19 @@ static void ed_draw(void) {
   fillr(EMX - 1, EMY - 1, EMW + 2, EMH + 2, 0x888888);
   fillr(EMX, EMY, EMW, EMH, 0xffffff);
   /* head */
+  panel_begin();
   { TTF_Font *pf = font_get(7, 17, 0); Tex t = mk_text(pf ? pf : F_NAME, ed.ultra ? "ULTRA WIGGLE" : ed.challenge ? "SUPER WIGGLE" : "DRAW", 0x323232, 0);
     draw_tex(&t, EMX + 20, EMY + (48 - t.h) / 2); tex_free(&t); }
   draw_label(F_SMALL, C_SOFT, "320 \xC3\x97 180 pixels \xC2\xB7 32 colours", EMX + EMW - 20, EMY + 13, 2);
   fillr(EMX, EMY + 47, EMW, 1, C_LINE);
+  panel_end(EMX, EMY, EMW, 48, 0);
   /* body */
   uint32_t bodyCol = 0xd9d4c7;
   fillr(EMX, EBODY_Y, EMW, EMH - 48 - EFOOT_H, bodyCol);
   /* tools */
+  panel_begin();
   for (int k = 0; k < 8; k++) ed_btn(ed_tool_box(k), NULL, edIcons[k], ed.tool == k, 0);
+  panel_end(ETOOLS_X - 4, EBODY_Y + 8, 116, 4 * 52 + 8, 1);
   /* stage: .ed-wrap */
   SDL_Rect cr; ed_canvas_rect(&cr);
   int wrapX = ESTAGE_X, wrapY = EBODY_Y + 12, wrapW = ESTAGE_W, wrapH = EMH - 48 - EFOOT_H - 24 - 48;
@@ -1514,6 +1582,7 @@ static void ed_draw(void) {
   }
   SDL_RenderSetClipRect(R, NULL);
   /* bar */
+  panel_begin();
   for (int i = 0; i < 13; i++) {
     if (!ed_bar_visible(i)) continue;
     Box b = ed_bar_box(i);
@@ -1524,7 +1593,9 @@ static void ed_draw(void) {
     ed_btn(b, L[i], NULL, pressed, dis);
   }
   if (ed.curX >= 0) { char pos[24]; snprintf(pos, sizeof pos, "%d,%d", ed.curX, ed.curY); TTF_Font *pf = font_get(7, 12, 0); Tex t = mk_text(pf ? pf : F_TINY, pos, 0x222222, 0); draw_tex(&t, ESTAGE_X + ESTAGE_W - t.w - 4, EMY + EMH - EFOOT_H - 12 - 40 + 12); tex_free(&t); }
+  panel_end(ESTAGE_X - 4, EMY + EMH - EFOOT_H - 12 - 44, ESTAGE_W + 8, 48, 2);
   /* side: current swatch, palette, sizes */
+  panel_begin();
   { int sx = ESIDE_X, sy = EBODY_Y + 12;
     fillr(sx, sy, 80, 46, 0x222222); fillr(sx + 2, sy + 2, 76, 42, 0xffffff); fillr(sx + 4, sy + 4, 72, 38, PAL[ed.color]); }
   { int cw = (ESIDE_W - 4) / 8; fillr(ESIDE_X, EBODY_Y + 12 + 58, cw * 8 + 4, cw * 4 + 4, 0x222222); }
@@ -1540,7 +1611,9 @@ static void ed_draw(void) {
     fillr(b.x + (b.w - q) / 2, b.y + (b.h - q) / 2, q, q, ed.size == SZ[i] ? 0xffffff : 0x222222);
   }
   if (ed.ultra && ed.started) draw_label(F_TINY, 0x7a3ce0, "ULTRA!", ESIDE_X + ESIDE_W / 2, ed_size_box(0).y + 70, 1);
+  panel_end(ESIDE_X - 6, EBODY_Y + 6, ESIDE_W + 12, ed_size_box(0).y + 100 - EBODY_Y, 3);
   /* foot */
+  panel_begin();
   fillr(EMX, EMY + EMH - EFOOT_H, EMW, 1, C_LINE);
   if (ed.challenge) {
     Box t = ed_title_box();
@@ -1550,6 +1623,7 @@ static void ed_draw(void) {
   Box cb = ed_foot_btn(0), db = ed_foot_btn(1);
   draw_btn(cb.x, cb.y, cb.w, cb.h, "Cancel", 1, 0);
   draw_btn(db.x, db.y, db.w, db.h, ed.challenge ? "Send" : "Done", 0, 0);
+  panel_end(EMX, EMY + EMH - EFOOT_H, EMW, EFOOT_H, 4);
   /* the Ultra Wiggle Paint annoyance page */
   if (ed.annoy) {
     SDL_SetRenderDrawColor(R, 0, 0, 0, 120); SDL_RenderFillRect(R, &all);
@@ -2039,6 +2113,7 @@ static void do_yeah(Screen *s, Item *it) {
   if (it->kind == K_WIG || it->kind == K_WIGFULL) snprintf(path, sizeof path, "/api/wiggle/%d/yeah", it->id);
   else snprintf(path, sizeof path, "/api/posts/%d/yeah", it->id);
   it->mine = !it->mine; it->yeahs += it->mine ? 1 : -1; /* instant feedback, server answer fixes it */
+  if (it->mine) sfx(2);
   net_send("POST", path, "{}", yeah_cb, s->serial, it->id);
 }
 static void open_login(void) {
@@ -2164,7 +2239,7 @@ static void open_item(Screen *s, Item *it) {
     snprintf(c->cname, sizeof c->cname, "%s", it->name);
     snprintf(c->text, sizeof c->text, "%s", it->body ? it->body : "");
     snprintf(c->text2, sizeof c->text2, "%s", it->age ? it->age : "all");
-    c->parent = calloc(1, sizeof(Item)); c->parent->msg = xstrdup(it->msg); c->parent->posts = it->posts;
+    c->parent = calloc(1, sizeof(Item)); c->parent->msg = xstrdup(it->msg); c->parent->posts = it->posts; c->parent->avatar = xstrdup(it->avatar);
     push(c);
     load_screen(c, 0);
   } else if (it->kind == K_MORE) {
@@ -2219,7 +2294,7 @@ static void open_item(Screen *s, Item *it) {
 /* ------------------------------------------------------------------ styles (Frutiger Aero, from app.css) */
 static Nine NCARD, NBUB, NFOCUS, NFOCUS_S, NHEAD;
 static Pill PGREEN, PGREEN_S, PALT, PALT_S, PRED, PYEAH, PYEAHON, PCHIP, PCHIP_ON;
-static SDL_Texture *bgTex, *logoTex, *headTex, *icoSmile, *icoPencil, *icoTree, *icoGames, *icoDoc, *icoPlus;
+static SDL_Texture *bgTex, *logoTex, *headTex, *icoSmile, *icoPencil, *icoTree, *icoGames, *icoDoc, *icoPlus, *icoNote;
 static void make_styles(void) {
   Stop card[2] = { { 0, 0xeeffffff }, { 1, 0xe6f4fcff } };
   NCARD = nine_make(S14(14), 1, 0xffffffff, card, 2, 6, 20, 0x33146ea0);
@@ -2258,6 +2333,10 @@ static void make_styles(void) {
   icoTree = cv_tex(&c); cv_free(&c);
   c = cv_new(30, 30); cv_rrect1(&c, 3, 8, 24, 14, 6, 0xff145d86); cv_rrect1(&c, 8, 12, 2, 6, 0, 0xffffffff); cv_rrect1(&c, 6, 14, 6, 2, 0, 0xffffffff); cv_circle(&c, 20, 13, 1.5f, 0xffffffff); cv_circle(&c, 23, 16, 1.5f, 0xffffffff); icoGames = cv_tex(&c); cv_free(&c);
   c = cv_new(26, 30); { float d[] = { 3, 2, 16, 2, 23, 9, 23, 28, 3, 28 }; cv_poly(&c, d, 5, 0xff6b6b6b); cv_poly(&c, d, 5, 0xff6b6b6b); } icoDoc = cv_tex(&c); cv_free(&c);
+  c = cv_new(30, 30); cv_circle(&c, 9, 23, 5, 0xff6b6b6b); cv_circle(&c, 22, 20, 5, 0xff6b6b6b);
+  cv_rrect1(&c, 12, 5, 2.5f, 18, 0, 0xff6b6b6b); cv_rrect1(&c, 25, 3, 2.5f, 17, 0, 0xff6b6b6b);
+  { float bm[] = { 12, 5, 27.5f, 2, 27.5f, 7, 12, 10 }; cv_poly(&c, bm, 4, 0xff6b6b6b); cv_poly(&c, bm, 4, 0xff6b6b6b); }
+  icoNote = cv_tex(&c); cv_free(&c);
   c = cv_new(40, 40); cv_rrect1(&c, 2, 2, 36, 36, 4, 0xff9a9a9a); cv_rrect1(&c, 3, 3, 34, 34, 3, 0xffffffff); cv_rrect1(&c, 19, 10, 2.5f, 20, 0, 0xff555555); cv_rrect1(&c, 10, 19, 20, 2.5f, 0, 0xff555555); icoPlus = cv_tex(&c); cv_free(&c);
   /* header bar: white gloss + shadow */
   c = cv_new(4, TOPH + 14);
@@ -2395,7 +2474,9 @@ static void globe_draw(void) {
 /* figures (website figure()): the 2D body recoloured to the shirt, cube head with the avatar letter */
 static const uint32_t AVC[8] = { 0xff004d, 0xffa300, 0x00e436, 0x29adff, 0x4b2d7f, 0x2ab7ca, 0xd291bc, 0x99e550 };
 static uint32_t name_hash(const char *u) { uint32_t n = 0; for (const unsigned char *p = (const unsigned char *)(u ? u : "?"); *p; p++) n = n * 31 + *p; return n; }
-static SDL_Texture *make_figure(const char *name, const char *user, int shirt, int fh) {
+static SDL_Texture *make_figure_f(const char *name, const char *user, int shirt, int fh, SDL_Surface *face);
+static SDL_Texture *make_figure(const char *name, const char *user, int shirt, int fh) { return make_figure_f(name, user, shirt, fh, NULL); }
+static SDL_Texture *make_figure_f(const char *name, const char *user, int shirt, int fh, SDL_Surface *face) {
   int fw = fh * 52 / 82;
   float k = fh / 82.0f;
   Cv c = cv_new(fw, fh);
@@ -2424,6 +2505,16 @@ static SDL_Texture *make_figure(const char *name, const char *user, int shirt, i
   for (int i = 0; i < 4; i++) { cv_line(&c, top[i * 2], top[i * 2 + 1], top[(i * 2 + 2) % 8], top[(i * 2 + 3) % 8], 1.2f, 0xff2b2b33); cv_line(&c, side[i * 2], side[i * 2 + 1], side[(i * 2 + 2) % 8], side[(i * 2 + 3) % 8], 1.2f, 0xff2b2b33); }
   float rx[5] = { 15 * k, 37 * k, 37 * k, 15 * k, 15 * k }, ry[5] = { 11 * k, 11 * k, 33 * k, 33 * k, 11 * k };
   for (int i = 0; i < 4; i++) cv_line(&c, rx[i], ry[i], rx[i + 1], ry[i + 1], 1.2f, 0xff2b2b33);
+  if (face && face->w > 0) {   /* avatar picture on the cube's front (cover crop) */
+    int fx0 = (int)(15 * k), fy0 = (int)(11 * k), fs = (int)(22 * k);
+    int side = face->w < face->h ? face->w : face->h, ox = (face->w - side) / 2, oy = (face->h - side) / 2;
+    for (int y = 0; y < fs; y++) for (int x = 0; x < fs; x++) {
+      const uint8_t *sp = (const uint8_t *)face->pixels + (oy + y * side / fs) * face->pitch + (ox + x * side / fs) * 4;
+      cv_blend(&c, fx0 + x, fy0 + y, 0xff000000u | ((uint32_t)sp[0] << 16) | ((uint32_t)sp[1] << 8) | sp[2], 1);
+    }
+    for (int i = 0; i < 4; i++) cv_line(&c, rx[i], ry[i], rx[i + 1], ry[i + 1], 1.2f, 0xff2b2b33);
+    SDL_Texture *tx = cv_tex(&c); cv_free(&c); return tx;
+  }
   /* letter */
   char ini[8] = "?";
   if (name && *name) { int L = 1; unsigned char ch = (unsigned char)name[0]; if (ch >= 0xF0) L = 4; else if (ch >= 0xE0) L = 3; else if (ch >= 0xC0) L = 2; memcpy(ini, name, (size_t)L); ini[L] = 0; if (L == 1 && ini[0] >= 'a' && ini[0] <= 'z') ini[0] -= 32; }
@@ -2440,7 +2531,7 @@ static SDL_Texture *make_figure(const char *name, const char *user, int shirt, i
   cv_free(&c);
   return tx;
 }
-typedef struct { char *name, *user; int shirt; SDL_Texture *fig; } HeroP;
+typedef struct { char *name, *user, *avatar; int shirt, faceDone; SDL_Texture *fig; } HeroP;
 static HeroP heroP[5]; static int heroN;
 static const char *CITY_N[5] = { "USA", "BRAZIL", "AFRICA", "GERMANY", "JAPAN" };
 static const float CITY_A[5] = { 300, 218, 152, 22, 88 };
@@ -2448,12 +2539,13 @@ static void people_cb(int serial, long code, const char *body, const char *err, 
   (void)serial; (void)err; (void)extra;
   if (code != 200 || !body) return;
   cJSON *j = cJSON_Parse(body), *p, *arr = j ? cJSON_GetObjectItem(j, "people") : NULL;
-  for (int i = 0; i < heroN; i++) { free(heroP[i].name); free(heroP[i].user); if (heroP[i].fig) SDL_DestroyTexture(heroP[i].fig); }
+  for (int i = 0; i < heroN; i++) { free(heroP[i].name); free(heroP[i].user); free(heroP[i].avatar); if (heroP[i].fig) SDL_DestroyTexture(heroP[i].fig); }
   heroN = 0;
   cJSON_ArrayForEach(p, arr) {
     if (heroN >= 5) break;
     const char *d = jstr(p, "display"), *u = jstr(p, "username");
     heroP[heroN].name = xstrdup(d && *d ? d : u); heroP[heroN].user = xstrdup(u); heroP[heroN].shirt = (int)jnum(p, "shirt"); heroP[heroN].fig = NULL;
+    heroP[heroN].avatar = xstrdup(jstr(p, "avatar")); heroP[heroN].faceDone = 0;
     heroN++;
   }
   cJSON_Delete(j);
@@ -2490,7 +2582,12 @@ static void draw_hero(Item *it, int X, int Y) {
     float th = CITY_A[i] * 3.14159265f / 180;
     float fx = cx + (globeR - 3) * sinf(th), fy = cy - (globeR - 3) * cosf(th);
     SDL_Texture *ft = NULL;
-    if (i < heroN) { if (!heroP[i].fig) heroP[i].fig = make_figure(heroP[i].name, heroP[i].user, heroP[i].shirt, fh); ft = heroP[i].fig; }
+    if (i < heroN) {
+      HeroP *hp = &heroP[i];
+      if (hp->avatar && *hp->avatar && !hp->faceDone) { ImgE *e = img_get(hp->avatar); if (e && e->s) { if (hp->fig) SDL_DestroyTexture(hp->fig); hp->fig = make_figure_f(hp->name, hp->user, hp->shirt, fh, e->s); hp->faceDone = 1; } }
+      if (!hp->fig) hp->fig = make_figure(hp->name, hp->user, hp->shirt, fh);
+      ft = hp->fig;
+    }
     else { if (!figEmpty) figEmpty = make_figure(NULL, NULL, 0, fh); ft = figEmpty; }
     /* rotate around the feet so the figure stands on the globe */
     SDL_Rect d = { (int)(fx - fw / 2.0f), (int)(fy - fh), fw, fh };
@@ -2558,12 +2655,12 @@ static int plaza_visible(const Screen *s, const Person *q) {
 }
 static float tagX[64], tagY[64]; static int tagVis[64];
 static void draw_plaza(Screen *s, Item *it, int X, int Y, int focus) {
-  int W = 500, H = 280;
+  int W = 400, H = 224;
   if (!p3buf.px) { p3buf.w = W; p3buf.h = H; p3buf.px = malloc((size_t)W * H * 4); p3buf.zb = malloc((size_t)W * H * sizeof(float)); }
   if (!p3tex_out) p3tex_out = SDL_CreateTexture(R, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, W, H);
-  static uint32_t last; static int odd; uint32_t now = SDL_GetTicks(); float dt = last ? (now - last) / 1000.0f : 0.016f; if (dt > 0.1f) dt = 0.1f;
-  odd = !odd;
-  if (odd && p3tex_out && last) {   /* the 3D view is rendered every second frame (30 fps) to keep the Wii U fast */
+  static uint32_t last; static int frameCnt, skip = 2; uint32_t now = SDL_GetTicks(); float dt = last ? (now - last) / 1000.0f : 0.016f; if (dt > 0.15f) dt = 0.15f;
+  frameCnt++;
+  if ((frameCnt % skip) && p3tex_out && last) {   /* the 3D view is rendered every 2nd or 3rd frame, depending on speed */
     card(X, Y, it->w, it->h);
     SDL_Rect d0 = { X + 2, Y + 2, it->w - 4, it->h - 4 }; SDL_RenderCopy(R, p3tex_out, NULL, &d0);
     goto tags;
@@ -2572,11 +2669,25 @@ static void draw_plaza(Screen *s, Item *it, int X, int Y, int focus) {
   if (s->autoRot) s->az += dt * 0.05f;
   if (s->polar < 0.35f) s->polar = 0.35f; if (s->polar > 1.45f) s->polar = 1.45f;
   if (s->dist < 16) s->dist = 16; if (s->dist > 150) s->dist = 150;
+  uint64_t t0 = SDL_GetPerformanceCounter();
   p3_build_world();
+  if (!p3world.pre) { p3_precompute(&p3world); p3_precompute(&p3cloud); }
   p3_set_camera(s->az, s->polar, s->dist, (float)W / H);
-  /* sky */
-  for (int y = 0; y < H; y++) { uint32_t c = 0xffa9dcf6; for (int x = 0; x < W; x++) p3buf.px[y * W + x] = c; }
-  for (int i = 0; i < W * H; i++) p3buf.zb[i] = 0;
+  /* sky above the horizon, sea below it (the sea is too big to draw as triangles) */
+  {
+    V3 fwh = vnorm(v3(p3fw.x, 0, p3fw.z));
+    V3 far = vadd(p3eye, vmul(fwh, 600)); far.y = -7;
+    float hx, hy = 0; V3 fc = p3_cam(far);
+    int hor = p3_project(fc, W, H, &hx, &hy) ? (int)hy : -1;
+    uint32_t sea = p3_shade(0x5db7e6, v3(0, 1, 0), 0);
+    for (int y = 0; y < H; y++) {
+      uint32_t c;
+      if (y < hor) c = 0xffa9dcf6;
+      else { float k = hor >= 0 ? fminf(1, (y - hor) / (H * 0.35f)) : 1; c = p3_fog(sea, 0.55f * (1 - k)); }
+      uint32_t *row = p3buf.px + y * W; for (int x = 0; x < W; x++) row[x] = c;
+    }
+  }
+  memset(p3buf.zb, 0, sizeof(float) * (size_t)W * H);
   p3_draw_mesh(&p3buf, &p3world, v3(0, 0, 0));
   for (int i = 0; i < 7; i++) { p3clouds[i].x += dt * (0.8f + i * 0.15f); if (p3clouds[i].x > 120) p3clouds[i].x = -120; p3_draw_mesh(&p3buf, &p3cloud, p3clouds[i]); }
   /* people walk */
@@ -2586,6 +2697,18 @@ static void draw_plaza(Screen *s, Item *it, int X, int Y, int focus) {
     tagVis[i] = 0;
     if (!plaza_visible(s, q)) continue;
     Walker *w = &q->w;
+    if (q->avatar && *q->avatar && !q->faceDone && q->tex >= 0) {   /* avatar picture on the cube head */
+      ImgE *e = img_get(q->avatar);
+      if (e && e->s) {
+        P3Tex *T = &p3tex[q->tex]; SDL_Surface *f = e->s;
+        int side = f->w < f->h ? f->w : f->h, ox = (f->w - side) / 2, oy = (f->h - side) / 2;
+        for (int y = 0; y < T->h; y++) for (int x = 0; x < T->w; x++) {
+          const uint8_t *sp = (const uint8_t *)f->pixels + (oy + y * side / T->h) * f->pitch + (ox + x * side / T->w) * 4;
+          T->px[y * T->w + x] = 0xff000000u | ((uint32_t)sp[0] << 16) | ((uint32_t)sp[1] << 8) | sp[2];
+        }
+        q->faceDone = 1;
+      }
+    }
     float amount = 1;
     if (w->wait > 0) { w->wait -= dt; w->phase += dt * 1.5f; amount = 0.05f; }
     else {
@@ -2607,6 +2730,7 @@ static void draw_plaza(Screen *s, Item *it, int X, int Y, int focus) {
   }
   p3_draw_mesh(&p3buf, &chars, v3(0, 0, 0));
   SDL_UpdateTexture(p3tex_out, NULL, p3buf.px, W * 4);
+  { double ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency(); skip = ms > 22 ? 3 : 2; }
   SDL_SetTextureScaleMode(p3tex_out, SDL_ScaleModeLinear);
   /* rounded card around (.plaza-card, radius 18) */
   card(X, Y, it->w, it->h);
@@ -2628,9 +2752,15 @@ tags:
 /* ------------------------------------------------------------------ drawing items */
 static uint32_t av_color(const char *u) { return PAL[AV_IDX[name_hash(u) % 8]]; }
 /* .av: avatar square with 2px border (red ring + dot when the person posted in the last day, like .av.fresh) */
+static const char *avUrl;   /* picture for the next draw_avatar call (set by draw_avatar_u) */
 static void draw_avatar_x(const char *name, const char *user, int x, int y, int s, int fresh) {
+  const char *url = avUrl; avUrl = NULL;
   if (fresh) { fillr(x - 4, y - 4, s + 8, s + 8, C_RED); fillr(x - 2, y - 2, s + 4, s + 4, C_WHITE); }
   fillr(x, y, s, s, fresh ? C_RED : C_LINE);
+  ImgE *pic = url && *url ? img_get(url) : NULL;
+  if (pic) { fillr(x + 2, y + 2, s - 4, s - 4, C_WHITE); img_draw_cover(pic, x + 2, y + 2, s - 4, s - 4);
+    if (fresh) { int r = s >= 60 ? 9 : 7; fillr(x + s - r - 1, y - 3, r + 4, r + 4, C_WHITE); fillr(x + s - r + 1, y - 1, r, r, C_RED); }
+    return; }
   fillr(x + 2, y + 2, s - 4, s - 4, av_color(user));
   char ini[8] = "?";
   if (name && *name) {
@@ -2670,7 +2800,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
     if (!full) card(X, Y, it->w, it->h);
     if (focus) focus_ring(X, Y, it->w, full ? it->h - PC_PAD : it->h);
     int fresh = is_fresh(it->lastPost);
-    draw_avatar_x(it->name, it->user, X + PC_PAD + 3, Y + PC_PAD, PC_AV, fresh);
+    avUrl = it->avatar; draw_avatar_x(it->name, it->user, X + PC_PAD + 3, Y + PC_PAD, PC_AV, fresh);
     it->avR = (SDL_Rect){ PC_PAD, PC_PAD, PC_AV + 6, PC_AV + 6 };
     int bx = X + PC_BUBX, bw = it->w - PC_BUBX - PC_PAD, by = Y + PC_PAD, bh = it->h - 2 * PC_PAD;
     nine_draw(&NBUB, bx, by, bw, bh);
@@ -2687,6 +2817,22 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
     if (it->cname && *it->cname) badge(tx, ty, it->cname, C_ORANGE); else badge(tx, ty, "Profile", C_BLUE);
     ty += 25;
     if (it->rich) { ty += 8; draw_rich(it, tx, ty); ty += it->richH; }
+    for (int k = 0; k < it->npics; k++) {
+      ty += 10;
+      int inner = bw - 2 * BUB_PX;
+      ImgE *e = img_get(it->pics[k]);
+      if (e) {
+        int dw = e->w * 2 < inner ? e->w * 2 : inner, dh = dw * e->h / (e->w ? e->w : 1);
+        if (dh > 520) { dh = 520; dw = dh * e->w / (e->h ? e->h : 1); }
+        if (dh != it->picH[k]) { it->h += dh - it->picH[k]; it->picH[k] = dh; }
+        SDL_Rect d = { tx, ty, dw, dh }; SDL_RenderCopy(R, e->t, NULL, &d);
+      } else {
+        ImgE *fe = img_find(it->pics[k]);
+        if (fe && fe->state == 3) { if (it->picH[k] != 30) { it->h += 30 - it->picH[k]; it->picH[k] = 30; } draw_label(F_SMALL, C_SOFT, "[image unavailable]", tx, ty + 4, 0); }
+        else { boxr(tx, ty, inner < 480 ? inner : 480, it->picH[k], 0xf4f9fc, 0xcfe6f1, 1); draw_label(F_SMALL, C_SOFT, "Loading picture...", tx + 16, ty + it->picH[k] / 2 - 10, 0); }
+      }
+      ty += it->picH[k];
+    }
     if (it->ndr) { ty += 10; draw_drawing(it, tx, ty); ty += it->dh; }
     ty += 14;
     snprintf(buf, sizeof buf, "Yeah! %d", it->yeahs);
@@ -2699,7 +2845,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
     break; }
   case K_REPLY: {
     boxr(X, Y, it->w, it->h, C_REPLY, C_REPLY_L, 1);
-    draw_avatar_x(it->name, it->user, X + 14, Y + 11, 50, is_fresh(it->lastPost));
+    avUrl = it->avatar; draw_avatar_x(it->name, it->user, X + 14, Y + 11, 50, is_fresh(it->lastPost));
     it->avR = (SDL_Rect){ 14, 11, 50, 50 };
     int tx = X + 14 + 53 + 14, ty = Y + 11;
     draw_tex(&it->tName, tx, ty);
@@ -2715,7 +2861,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
   case K_COMM: {
     card(X, Y, it->w, it->h);
     if (focus) focus_ring(X, Y, it->w, it->h);
-    draw_avatar(it->name, it->cid, X + 16, Y + 14, 56);
+    avUrl = it->avatar; draw_avatar(it->name, it->cid, X + 16, Y + 14, 56);
     draw_tex(&it->tName, X + 88, Y + 14);
     badge(X + 88 + it->tName.w + 10, Y + 16, it->age && !strcmp(it->age, "14") ? "14+" : it->age && !strcmp(it->age, "16") ? "16+" : it->age && !strcmp(it->age, "18") ? "18+" : "All ages", C_GREEN);
     snprintf(buf, sizeof buf, it->posts == 1 ? "1 post" : "%d posts", it->posts);
@@ -2734,7 +2880,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
       it->bgTex = cv_tex(&c); cv_free(&c);
     }
     SDL_Rect d = { X, Y, it->w, bh }; SDL_RenderCopy(R, it->bgTex, NULL, &d);
-    Tex sh = it->tName; (void)sh;
+    { ImgE *th = it->avatar && *it->avatar ? img_get(it->avatar) : NULL; if (th) img_draw_cover(th, X + 1, Y + 1, it->w - 2, bh - 1); }
     if (it->tName.t) {
       SDL_SetTextureColorMod(it->tName.t, 0, 0, 0); SDL_SetTextureAlphaMod(it->tName.t, 46);
       draw_tex(&it->tName, X + (it->w - it->tName.w) / 2, Y + (bh - it->tName.h) / 2 + 4);
@@ -2742,7 +2888,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
       draw_tex(&it->tName, X + (it->w - it->tName.w) / 2, Y + (bh - it->tName.h) / 2);
     }
     int fy = Y + bh + 14;
-    draw_avatar(it->name, it->cid, X + 18, fy, 56);
+    avUrl = it->avatar; draw_avatar(it->name, it->cid, X + 18, fy, 56);
     int nw = draw_label(F_NAME, C_INK, it->name, X + 90, fy + 2, 0);
     badge(X + 90 + nw + 10, fy + 4, "All ages", C_GREEN);
     snprintf(buf, sizeof buf, it->posts == 1 ? "1 post" : "%d posts", it->posts);
@@ -2752,8 +2898,10 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
   case K_CHEAD: {
     card(X, Y, it->w, it->h);
     fillr(X + 20, Y + 20, 100, 100, C_GREEN);
+    { ImgE *th = it->avatar && *it->avatar ? img_get(it->avatar) : NULL; if (th) { img_draw_cover(th, X + 20, Y + 20, 100, 100); goto chead_text; } }
     Tex *l = label(F_HUGE, C_WHITE, it->name && *it->name ? (char[2]){ (char)((it->name[0] >= 'a' && it->name[0] <= 'z') ? it->name[0] - 32 : it->name[0]), 0 } : "?");
     draw_tex(l, X + 70 - l->w / 2, Y + 70 - l->h / 2);
+  chead_text:;
     int tx = X + 140, ty = Y + 20;
     draw_tex(&it->tName, tx, ty); ty += it->tName.h + 6;
     badge(tx, ty, it->age && !strcmp(it->age, "14") ? "14+" : it->age && !strcmp(it->age, "16") ? "16+" : it->age && !strcmp(it->age, "18") ? "18+" : "All ages", it->age && !strcmp(it->age, "18") ? C_RED : it->age && !strcmp(it->age, "16") ? C_ORANGE : it->age && !strcmp(it->age, "14") ? C_BLUE : C_GREEN);
@@ -2791,7 +2939,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
     card(X, Y, it->w, it->h);
     if (focus) focus_ring(X, Y, it->w, it->h);
     if (it->act == 1) {   /* .card.composer: avatar, fake input, Draw + Write */
-      draw_avatar(me.display, me.username, X + 20, Y + 20, 66);
+      avUrl = me.avatar; draw_avatar(me.display, me.username, X + 20, Y + 20, 66);
       boxr(X + 104, Y + 20, it->w - 124, 54, 0xffffff, 0xbdbdbd, 1);
       draw_label(F_BODYS, 0x8a9399, it->body, X + 120, Y + 34, 0);
       int ww = btn_w("Write", 0), dw = btn_w("Draw", 0) + 30;
@@ -2818,7 +2966,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
   case K_FEAT: {
     card(X, Y, it->w, it->h);
     draw_drawing(it, X + 14, Y + 14);
-    draw_avatar(it->name, it->user, X + 20, Y + 20, 34);
+    avUrl = it->avatar; draw_avatar(it->name, it->user, X + 20, Y + 20, 34);
     snprintf(buf, sizeof buf, "%s · %s", it->cname && *it->cname ? it->cname : "Profile", it->name ? it->name : "");
     draw_label(F_SMALL, C_SOFT, buf, X + 14, Y + 14 + it->dh + 10, 0);
     break; }
@@ -2880,7 +3028,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
     if (focus) focus_ring(X, Y, it->w, it->h);
     draw_drawing(it, X + 12, Y + 12);
     int fy = Y + 12 + it->dh + 10;
-    draw_avatar(it->name, it->user, X + 12, fy, 30);
+    avUrl = it->avatar; draw_avatar(it->name, it->user, X + 12, fy, 30);
     char nm[48]; snprintf(nm, sizeof nm, "%.14s", it->name ? it->name : "");
     draw_label(F_SMALL, C_INK, nm, X + 50, fy + 3, 0);
     snprintf(buf, sizeof buf, "Yeah! %d", it->yeahs);
@@ -2889,8 +3037,13 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
   case K_PROFILE: {
     card(X, Y, it->w, it->h);
     /* character figure on the left like the 3D character on the website */
-    static SDL_Texture *pf; static char pfUser[32];
-    if (!pf || strcmp(pfUser, it->user ? it->user : "")) { if (pf) SDL_DestroyTexture(pf); pf = make_figure(it->name, it->user, it->posts >= 0 ? (int)(name_hash(it->user) % 12) : 0, 230); snprintf(pfUser, sizeof pfUser, "%s", it->user ? it->user : ""); }
+    static SDL_Texture *pf; static char pfUser[32]; static int pfFace;
+    ImgE *fe = it->avatar && *it->avatar ? img_get(it->avatar) : NULL;
+    if (!pf || strcmp(pfUser, it->user ? it->user : "") || (fe && !pfFace)) {
+      if (pf) SDL_DestroyTexture(pf);
+      pf = make_figure_f(it->name, it->user, it->icon, 230, fe ? fe->s : NULL); pfFace = fe != NULL;
+      snprintf(pfUser, sizeof pfUser, "%s", it->user ? it->user : "");
+    }
     if (pf) { SDL_Rect d = { X + 40, Y + 22, 230 * 52 / 82, 230 }; SDL_RenderCopy(R, pf, NULL, &d); }
     int tx = X + 260, ty = Y + 24;
     draw_tex(&it->tName, tx, ty); ty += it->tName.h + 4;
@@ -2957,7 +3110,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
 
 /* ------------------------------------------------------------------ chrome: header, footer */
 typedef struct { int x, w; } TabR;
-static TabR tabR[NTABS]; static int signinX, signinW;
+static TabR tabR[NTABS]; static int signinX, signinW, noteX;
 static SDL_Texture *iconTex[5];
 static void make_icons(void) {
   for (int i = 0; i < 5; i++) {
@@ -2976,7 +3129,7 @@ static void draw_header(void) {
 #if STAGE >= 2
   if (me.id) names[4] = "Profile";
 #endif
-  int w = 104, x = 600;
+  int w = 104, x = 540;
   for (int i = 0; i < NTABS; i++) {
     int tw = i == 1 ? 128 : w;
     tabR[i] = (TabR){ x, tw };
@@ -2987,7 +3140,11 @@ static void draw_header(void) {
     if (on) fillr(x + 6, TOPH - 4, tw - 12, 4, C_GREEN);
     x += tw;
   }
-  { SDL_Rect d = { x + 18, 23, 26, 30 }; SDL_RenderCopy(R, icoDoc, NULL, &d); }
+  /* music on/off + rules icon */
+  noteX = x + 10;
+  { SDL_Rect d = { noteX, 22, 32, 32 }; SDL_SetTextureAlphaMod(icoNote, auMusic ? 255 : 110); SDL_RenderCopy(R, icoNote, NULL, &d); SDL_SetTextureAlphaMod(icoNote, 255);
+    if (!auMusic) { setc(0xe5322d); for (int k = -1; k <= 1; k++) SDL_RenderDrawLine(R, noteX + 2 + k, 52, noteX + 30 + k, 24); } }
+  { SDL_Rect d = { x + 52, 23, 26, 30 }; SDL_RenderCopy(R, icoDoc, NULL, &d); }
 #if STAGE >= 2
   if (!me.id) { signinW = 100; signinX = SW - 24 - signinW; draw_btn(signinX, 19, signinW, 38, "Sign in", 0, 0); }
   else signinW = 0;
@@ -3038,6 +3195,7 @@ int main(int argc, char **argv) {
   srand((unsigned)time(NULL));
 
   if (SDL_Init(SDL_INIT_VIDEO) < 0) return 1;
+  au_init();
   WIN = SDL_CreateWindow("Aeroverse", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SW, SH, 0);
   R = SDL_CreateRenderer(WIN, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
   if (!R) R = SDL_CreateRenderer(WIN, -1, 0);
@@ -3066,6 +3224,7 @@ int main(int argc, char **argv) {
   curl_global_init(CURL_GLOBAL_DEFAULT);
   netMx = SDL_CreateMutex(); netCv = SDL_CreateCond();
   SDL_Thread *nt = SDL_CreateThreadWithStackSize(net_thread, "net", 512 * 1024, NULL);
+  img_init();
 
   load_token();
   if (sessionTok[0]) net_send("GET", "/api/me", NULL, me_cb, 0, 0); else meKnown = 1;
@@ -3084,6 +3243,7 @@ int main(int argc, char **argv) {
     if (!running) break;
     frameNo++;
     net_poll();
+    img_poll();
 
     { static int shownUpd; if (updateBuild > 0 && !shownUpd) { shownUpd = 1; if (roots[0]) load_screen(roots[0], 0); } }
     /* refresh pages when sign-in state changes (buttons depend on it) */
@@ -3118,6 +3278,8 @@ int main(int argc, char **argv) {
     { static int wasModal; int modal = ed.open + kb.open * 2 + pe.open * 4; if (wasModal && modal != wasModal) swallowTouch = 1; wasModal = modal; }
 #endif
     if (swallowTouch) { touchTapX = -1; touchFresh = 0; if (!tDown) swallowTouch = 0; }
+    if (touchTapX >= 0) sfx(1);
+    if (trig & VPAD_BUTTON_A) sfx(1);
     /* key repeat for the D-Pad */
     uint32_t dirs = hold & (VPAD_BUTTON_UP | VPAD_BUTTON_DOWN | VPAD_BUTTON_LEFT | VPAD_BUTTON_RIGHT);
     if (trig & dirs) holdT = SDL_GetTicks() + 380;
@@ -3160,6 +3322,7 @@ int main(int argc, char **argv) {
       if (touchTapX >= 0) {
         if (touchTapY < TOPH) {
           for (int i = 0; i < NTABS; i++) if (touchTapX >= tabR[i].x && touchTapX < tabR[i].x + tabR[i].w) go_tab(i);
+          if (touchTapX >= noteX - 6 && touchTapX < noteX + 40) { auMusic = !auMusic; au_save(); toast(auMusic ? "Music on" : "Music off"); }
 #if STAGE >= 2
           if (signinW && touchTapX >= signinX && touchTapX < signinX + signinW) open_login();
 #endif
