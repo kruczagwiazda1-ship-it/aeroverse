@@ -142,18 +142,19 @@ static int net_pending(void) { mx_lock(&netMx); int p = netBusy || reqHead != re
 #ifdef HAVE_WEBP
 #include <webp/decode.h>
 #endif
-typedef struct { char url[200]; Img full, v[2]; int state; uint32_t used; } Pic;   /* state 0 free, 1 loading, 2 ok, 3 failed */
+typedef struct { char url[200]; Img full, v[2]; int state, big; uint32_t used; } Pic;   /* state 0 free, 1 loading, 2 ok, 3 failed */
 #define NPIC 40
-#define PIC_MAX 128
+#define PIC_MAX 96
+#define PIC_MAX_BIG 300
 static Pic pics[NPIC];
 static uint32_t picTick;
 static Mx picMx;
-static char picQ[24][200]; static int picQh, picQt;
+static char picQ[24][200]; static int picQbig[24]; static int picQh, picQt;
 typedef struct { char url[200]; Img m; } PicDone;
 static PicDone picD[24]; static int picDh, picDt;
 static int picChanged;
 
-static Img pic_decode(const unsigned char *data, size_t len) {
+static Img pic_decode(const unsigned char *data, size_t len, int maxd) {
   Img out = { 0 };
   int w = 0, h = 0;
   uint8_t *px = NULL;
@@ -171,8 +172,8 @@ static Img pic_decode(const unsigned char *data, size_t len) {
 #ifdef HAVE_WEBP
 shrink:
 #endif
-  if (out.w > PIC_MAX || out.h > PIC_MAX) {
-    float k = (float)PIC_MAX / (out.w > out.h ? out.w : out.h);
+  if (out.w > maxd || out.h > maxd) {
+    float k = (float)maxd / (out.w > out.h ? out.w : out.h);
     int nw = (int)(out.w * k), nh = (int)(out.h * k);
     Img s = img_scale(&out, nw < 1 ? 1 : nw, nh < 1 ? 1 : nh); img_free(&out); out = s;
   }
@@ -184,7 +185,7 @@ static void pic_thread(void *u) {
   while (!netQuit) {
     mx_lock(&picMx);
     if (picQh == picQt) { mx_unlock(&picMx); thread_sleep_ms(15); continue; }
-    char url[200]; snprintf(url, sizeof url, "%s", picQ[picQt]); picQt = (picQt + 1) % 24;
+    char url[200]; snprintf(url, sizeof url, "%s", picQ[picQt]); int big = picQbig[picQt]; picQt = (picQt + 1) % 24;
     mx_unlock(&picMx);
     Buf b = { 0 }; long code = 0;
     if (c) {
@@ -196,7 +197,7 @@ static void pic_thread(void *u) {
       curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
     }
     Img m = { 0 };
-    if (code == 200 && b.p && b.n > 8) m = pic_decode((unsigned char *)b.p, b.n);
+    if (code == 200 && b.p && b.n > 8) m = pic_decode((unsigned char *)b.p, b.n, big ? PIC_MAX_BIG : PIC_MAX);
     free(b.p);
     mx_lock(&picMx);
     if ((picDh + 1) % 24 != picDt) { snprintf(picD[picDh].url, sizeof picD[0].url, "%s", url); picD[picDh].m = m; picDh = (picDh + 1) % 24; }
@@ -217,7 +218,7 @@ static void pic_poll(void) {
     picChanged = 1;
   }
 }
-static Pic *pic_get(const char *url) {
+static Pic *pic_get2(const char *url, int big) {
   if (!url || !*url || strlen(url) >= 200) return NULL;
   picTick++;
   Pic *p = pic_find(url);
@@ -232,12 +233,21 @@ static Pic *pic_get(const char *url) {
   img_free(&pics[i].full); img_free(&pics[i].v[0]); img_free(&pics[i].v[1]);
   memset(&pics[i], 0, sizeof pics[i]);
   snprintf(pics[i].url, sizeof pics[i].url, "%s", url);
-  pics[i].state = 1; pics[i].used = picTick;
+  pics[i].state = 1; pics[i].used = picTick; pics[i].big = big;
   mx_lock(&picMx);
-  if ((picQh + 1) % 24 != picQt) { snprintf(picQ[picQh], sizeof picQ[0], "%s", url); picQh = (picQh + 1) % 24; }
+  if ((picQh + 1) % 24 != picQt) { snprintf(picQ[picQh], sizeof picQ[0], "%s", url); picQbig[picQh] = big; picQh = (picQh + 1) % 24; }
   else pics[i].state = 0;
   mx_unlock(&picMx);
   return NULL;
+}
+static Pic *pic_get(const char *url) { return pic_get2(url, 0); }
+/* allowed picture hosts for [img=...] (same list as the website) */
+static int img_host_ok(const char *u) {
+  static const char *H[] = { "i.imgur.com", "i.postimg.cc", "files.catbox.moe", "i.ibb.co", "upload.wikimedia.org", "i.redd.it", "media.tenor.com", "i.giphy.com", "media.giphy.com" };
+  if (strncmp(u, "https://", 8)) return 0;
+  const char *h = u + 8; size_t L = strcspn(h, "/:?#");
+  for (size_t i = 0; i < sizeof H / sizeof H[0]; i++) if (strlen(H[i]) == L && !strncmp(h, H[i], L)) return 1;
+  return 0;
 }
 /* square picture at size s (smoothly scaled, two sizes kept per picture) */
 static void pic_draw_sq(Cv *c, Pic *p, int x, int y, int s) {

@@ -23,7 +23,7 @@ ICON		:=	icon.png
 
 ARCH	:=	-march=armv6k -mtune=mpcore -mfloat-abi=hard -mtp=soft
 
-CFLAGS	:=	-g -Wall -O2 -mword-relocations -ffunction-sections -Wno-unused-function -Wno-format-truncation $(ARCH)
+CFLAGS	:=	-g -Wall -O2 -mword-relocations -ffunction-sections -Wno-unused-function -Wno-format-truncation -Wno-misleading-indentation $(ARCH)
 CFLAGS	+=	$(INCLUDE) -D__3DS__
 
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11

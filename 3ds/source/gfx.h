@@ -172,13 +172,14 @@ static void img_cover(Cv *c, const Img *m, int x, int y, int w, int h) {
 typedef struct { int font, size; uint32_t cp; uint8_t *bm; int w, h, xo, yo, adv; } Glyph;
 #define NGLYPH 1024
 static Glyph glyphs[NGLYPH];
-static stbtt_fontinfo fonts[2];
-static int fontAsc[2];   /* ascent in font units */
-enum { FR = 0, FB = 1 };
+static stbtt_fontinfo fonts[3];
+static int fontAsc[3];   /* ascent in font units */
+enum { FR = 0, FB = 1, FM = 2 };   /* regular, bold, medium (regular made thicker: easier to read on the 3DS screens) */
 static void text_init(const unsigned char *reg, const unsigned char *bold) {
   stbtt_InitFont(&fonts[0], reg, stbtt_GetFontOffsetForIndex(reg, 0));
   stbtt_InitFont(&fonts[1], bold, stbtt_GetFontOffsetForIndex(bold, 0));
-  for (int i = 0; i < 2; i++) { int a, d, g; stbtt_GetFontVMetrics(&fonts[i], &a, &d, &g); fontAsc[i] = a; }
+  fonts[2] = fonts[0];
+  for (int i = 0; i < 3; i++) { int a, d, g; stbtt_GetFontVMetrics(&fonts[i], &a, &d, &g); fontAsc[i] = a; }
 }
 static Glyph *glyph(int font, int size, uint32_t cp) {
   uint32_t hsh = (cp * 2654435761u ^ (uint32_t)(size * 131 + font * 7)) % NGLYPH;
@@ -193,12 +194,21 @@ static Glyph *glyph(int font, int size, uint32_t cp) {
       g->font = font; g->size = size; g->cp = cp; g->adv = (int)lroundf(adv * sc);
       if (g->adv <= 0) g->adv = 1;
       g->bm = stbtt_GetGlyphBitmap(&fonts[font], sc, sc, gi, &g->w, &g->h, &g->xo, &g->yo);
+      if (font == FM && g->bm && g->w > 0) {   /* thicken: max of the glyph and the glyph moved 1 px right */
+        int nw = g->w + 1;
+        uint8_t *nb = malloc((size_t)nw * g->h);
+        for (int y = 0; y < g->h; y++) for (int x = 0; x < nw; x++) {
+          int a = x < g->w ? g->bm[y * g->w + x] : 0, b = x > 0 ? g->bm[y * g->w + x - 1] : 0;
+          nb[y * nw + x] = (uint8_t)(a > b ? a : b);
+        }
+        stbtt_FreeBitmap(g->bm, NULL); g->bm = nb; g->w = nw;
+      }
       return g;
     }
   }
   /* table crowded: drop one slot */
   Glyph *g = &glyphs[hsh];
-  if (g->bm) stbtt_FreeBitmap(g->bm, NULL);
+  if (g->bm) free(g->bm);
   memset(g, 0, sizeof *g);
   return glyph(font, size, cp);
 }
