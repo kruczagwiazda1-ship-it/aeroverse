@@ -9,7 +9,7 @@
 #ifndef STAGE
 #define STAGE 3
 #endif
-#define APP_VERSION "2.1"
+#define APP_VERSION "2.2"
 /* build_info.h is written by the GitHub workflow: APP_BUILD (run number) and UPDATE_REPO (owner/repo) */
 #if defined(__has_include)
 #if __has_include("build_info.h")
@@ -134,6 +134,8 @@ static int label_w(TTF_Font *f, const char *s) { int w = 0, h = 0; if (s && *s) 
 
 static void draw_btn(int x, int y, int w, int h, const char *txt, int style, int focus);
 static void card(int x, int y, int w, int h);
+static int badge_w(const char *txt);
+static void badge(int x, int y, const char *txt, uint32_t bg);
 
 /* ------------------------------------------------------------------ text helpers */
 static long utc_now(void);
@@ -491,8 +493,8 @@ static void me_cb(int serial, long code, const char *body, const char *err, int 
 
 /* ------------------------------------------------------------------ list items */
 enum { K_POST, K_FULLPOST, K_REPLY, K_COMM, K_HEAD, K_MORE, K_ACTION, K_INFO, K_FIELD, K_DRAWF, K_WIG, K_WIGFULL, K_SEC, K_DCELL, K_PROFILE, K_PLAZA, K_GAME,
-       K_HERO, K_PROMPT, K_BANNER, K_CHEAD, K_CNEW, K_FEAT, K_EMPTY, K_SEP, K_CHIPS, K_LTABS };
-enum { A_NONE, A_WRITE_POST, A_WRITE_REPLY, A_SIGNIN, A_SIGNOUT, A_SEND, A_DRAW, A_MODE, A_WIG_DRAW, A_RETRY, A_DRAW_REPLY, A_PLAZA_FILTER, A_UPDATE };
+       K_HERO, K_PROMPT, K_BANNER, K_CHEAD, K_CNEW, K_FEAT, K_EMPTY, K_SEP, K_CHIPS, K_LTABS, K_RULE };
+enum { A_NONE, A_WRITE_POST, A_WRITE_REPLY, A_SIGNIN, A_SIGNOUT, A_SEND, A_DRAW, A_MODE, A_WIG_DRAW, A_RETRY, A_DRAW_REPLY, A_PLAZA_FILTER, A_UPDATE, A_RULES, A_RULESOK };
 
 typedef struct Item {
   int kind, act, id, yeahs, replies, mine, posts, sel_ok, icon;
@@ -530,7 +532,7 @@ static void item_drawing(Item *it, const char *code) {
 }
 
 /* ------------------------------------------------------------------ screens */
-enum { S_FEED, S_COMMS, S_COMM, S_POST, S_WIGGLE, S_WENTRY, S_COMPOSE, S_LOGIN, S_PLAZA, S_GAMES, S_USER, S_STUB };
+enum { S_FEED, S_COMMS, S_COMM, S_POST, S_WIGGLE, S_WENTRY, S_COMPOSE, S_LOGIN, S_PLAZA, S_GAMES, S_USER, S_STUB, S_RULES };
 typedef struct { char *name, *user, *avatar; int tags, shirt, tex, faceDone; Walker w; } Person;
 typedef struct Screen {
   int kind, serial;
@@ -566,8 +568,8 @@ static int serialCounter = 1;
 #define FULLX 36
 #define FULLW 1208
 static int has_side(const Screen *s) { return s && (s->kind == S_FEED || s->kind == S_COMMS || s->kind == S_COMM); }
-static int colx(const Screen *s) { return s && s->kind == S_LOGIN ? (SW - 620) / 2 : has_side(s) ? MAINX : CX; }
-static int colw(const Screen *s) { return s && s->kind == S_LOGIN ? 620 : has_side(s) ? MAINW : CW; }
+static int colx(const Screen *s) { return s && s->kind == S_RULES ? (SW - 780) / 2 : s && s->kind == S_LOGIN ? (SW - 620) / 2 : has_side(s) ? MAINX : CX; }
+static int colw(const Screen *s) { return s && s->kind == S_RULES ? 780 : s && s->kind == S_LOGIN ? 620 : has_side(s) ? MAINW : CW; }
 
 static Screen *cur(void) { return depth ? stack[depth - 1] : NULL; }
 static Screen *by_serial(int s) { for (int i = 0; i < depth; i++) if (stack[i]->serial == s) return stack[i]; for (int i = 0; i < NTABS; i++) if (roots[i] && roots[i]->serial == s) return roots[i]; return NULL; }
@@ -576,7 +578,7 @@ static Item *new_item(Item **arr, int *n, int *cap, int kind) {
   Item *it = &(*arr)[(*n)++];
   memset(it, 0, sizeof *it);
   it->kind = kind;
-  it->sel_ok = !(kind == K_HEAD || kind == K_INFO || kind == K_REPLY || kind == K_SEC || kind == K_PROFILE || kind == K_EMPTY || kind == K_SEP || kind == K_CHEAD);
+  it->sel_ok = !(kind == K_HEAD || kind == K_INFO || kind == K_REPLY || kind == K_SEC || kind == K_PROFILE || kind == K_EMPTY || kind == K_SEP || kind == K_CHEAD || kind == K_RULE);
   return it;
 }
 static Item *add_item(Screen *s, int kind) { Item *it = new_item(&s->it, &s->n, &s->cap, kind); it->w = kind == K_HERO ? FULLW : colw(s); return it; }
@@ -678,6 +680,11 @@ static void build_item(Item *it) {
     it->tBody = mk_text(F_BODYS, b, C_INK, it->w - 44);
     free(b);
     it->h = 22 + it->tName.h + (it->tBody.t ? 8 + it->tBody.h : 0) + 22;
+  } else if (it->kind == K_RULE) {
+    int tx = it->msg ? 30 + badge_w(it->msg) + 14 : 30;
+    it->tName = mk_text(F_NAME, it->title, C_INK, it->w - tx - 30 - (it->act ? 130 : 0));
+    it->tBody = mk_text(F_BODYS, it->body, it->msg && !it->id ? C_INK : C_SOFT, it->w - tx - 30);
+    it->h = 18 + (it->tName.t ? it->tName.h + 6 : 0) + (it->tBody.t ? it->tBody.h : 0) + 18;
   } else if (it->kind == K_INFO) {
     it->tBody = mk_text(F_BODYS, it->body, C_SOFT, it->w - 40);
     it->h = (it->tBody.h ? it->tBody.h : 30) + 24;
@@ -983,7 +990,41 @@ static void plaza_cb(int serial, long code, const char *body, const char *err, i
   cJSON_Delete(j);
 }
 
+static void add_rule(Screen *s, int num, const char *title, const char *text, int instant) {
+  Item *r = add_item(s, K_RULE); char n[8]; snprintf(n, sizeof n, "%d", num);
+  r->id = num; r->msg = xstrdup(n); r->title = xstrdup(title); r->body = xstrdup(text); r->act = instant; build_item(r);
+}
+static void add_age_row(Screen *s, const char *lab, const char *text, int col) {
+  Item *r = add_item(s, K_RULE); r->msg = xstrdup(lab); r->body = xstrdup(text); r->icon = col; build_item(r);
+}
+static void add_rules_items(Screen *s) {
+  Item *h = add_item(s, K_HEAD); h->name = xstrdup(s->mode ? "Welcome to Aeroverse! Please read the rules" : "Aeroverse Rules");
+  h->body = xstrdup("Everyone who uses Aeroverse follows these rules."); build_item(h);
+  add_rule(s, 1, "No piracy and no ROMs", "We do not share pirated games, ROMs, cracks or links to them, and we do not ask for them. This leads to an instant ban.", 1);
+  add_rule(s, 2, "No console modding help", "We do not help with and do not talk about modding the Switch, Switch 2, PS5 or Xbox Series X|S. This leads to an instant ban.", 1);
+  add_rule(s, 3, "No swearing in All ages communities", "Keep your language clean in every community rated All ages. Higher-rated communities allow stronger language as their rating says, but never to attack someone.", 0);
+  add_rule(s, 4, "No NSFW and no gore", "No sexual content, nudity, graphic violence or gore anywhere on Aeroverse, in any age rating, in text or in drawings. Inappropriate posts are deleted.", 0);
+  add_rule(s, 5, "Be kind", "No harassment, bullying, threats, hate speech or picking on people. Disagree politely.", 0);
+  add_rule(s, 6, "Protect privacy", "Do not post addresses, phone numbers, real names or photos of other people. Think twice before sharing your own.", 0);
+  add_rule(s, 7, "No spam and no scams", "No ads, no flooding, no phishing and no suspicious links.", 0);
+  add_rule(s, 8, "Post in the right place", "Stay on the topic of the community and respect its age rating.", 0);
+  add_rule(s, 9, "One honest account", "Do not pretend to be the admin or someone else, and do not make new accounts to get around a ban.", 0);
+  if (s->mode) { Item *a = add_item(s, K_ACTION); a->act = A_RULESOK; a->title = xstrdup("I have read the rules and accept"); build_item(a); }
+  add_sec(s, "Age ratings", 0);
+  add_age_row(s, "All ages", "For everyone. No swearing.", 0);
+  add_age_row(s, "14+", "Mild language and mild themes. No NSFW.", 1);
+  add_age_row(s, "16+", "Stronger language and more mature topics. No NSFW.", 2);
+  add_age_row(s, "18+", "Adult conversation and strong language. No NSFW.", 3);
+  Item *i = add_item(s, K_INFO); i->body = xstrdup("Communities with a rating above All ages ask you to confirm your age before you enter."); build_item(i);
+  Item *b = add_item(s, K_HEAD); b->name = xstrdup("If you break the rules");
+  b->body = xstrdup("The admin can delete your posts, ban you for a while (1 hour up to 30 days) or ban you for good. Piracy and console modding mean an instant ban. The admin's decision is final."); build_item(b);
+}
+static void open_rules(int gate) {
+  Screen *r = new_screen(S_RULES); r->mode = gate;
+  push(r); load_screen(r, 0);
+}
 static void add_header_items(Screen *s) {
+  if (s->kind == S_RULES) { add_rules_items(s); return; }
   if (s->kind == S_FEED) {
     Item *hero = add_item(s, K_HERO); build_item(hero); hero->sel_ok = 0;
     if (!heroLoaded) { heroLoaded = 1; net_send("GET", "/api/people", NULL, people_cb, 0, 0); }
@@ -2008,7 +2049,8 @@ static void rebuild_compose(Screen *s) {
     if (s->mode) { Item *d = add_item(s, K_FIELD); d->act = 3; d->title = xstrdup("Display name (optional)"); d->body = xstrdup(s->cname); build_item(d); }
     char m[110]; int n = utf8_len(s->pass); if (n > 100) n = 100; memset(m, '*', (size_t)n); m[n] = 0;
     Item *p = add_item(s, K_FIELD); p->act = 2; p->title = xstrdup(s->mode ? "Password (8 or more characters)" : "Password"); p->body = xstrdup(m); build_item(p);
-    if (s->mode) { Item *i = add_item(s, K_INFO); i->body = xstrdup("By creating an account you accept the Aeroverse rules: no piracy, no console modding help, no swearing in All ages, no NSFW or gore, be kind."); build_item(i); }
+    if (s->mode) { Item *i = add_item(s, K_INFO); i->body = xstrdup("By creating an account you accept the Aeroverse rules: no piracy, no console modding help, no swearing in All ages, no NSFW or gore, be kind."); build_item(i);
+      Item *rb = add_item(s, K_ACTION); rb->act = A_RULES; rb->title = xstrdup("Read the rules"); build_item(rb); }
     Item *b = add_item(s, K_ACTION); b->act = A_SEND; b->title = xstrdup(s->loading ? "..." : s->mode ? "Create account" : "Sign in"); build_item(b);
     return;
   }
@@ -2214,6 +2256,8 @@ static void open_item(Screen *s, Item *it) {
     return;
   }
   if (it->kind == K_ACTION && it->act == A_UPDATE) { update_start(); return; }
+  if (it->kind == K_ACTION && it->act == A_RULES) { open_rules(0); return; }
+  if (it->kind == K_ACTION && it->act == A_RULESOK) { auRules = 1; au_save(); sfx(2); pop(); toast("Thanks! Have fun on Aeroverse."); return; }
   if (it->kind == K_ACTION && it->act == A_PLAZA_FILTER) { s->filter = (s->filter + 1) % 4; static const char *FN[4] = { "Showing: Everyone", "Showing: Popular", "Showing: Newest", "Showing: Active now" }; free(it->title); it->title = xstrdup(FN[s->filter]); s->psel = 0; return; }
 #if STAGE >= 2
   if (it->kind == K_ACTION && it->act == A_SIGNOUT) { do_signout(); go_tab(4); return; }
@@ -2928,6 +2972,18 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
     Tex *w = label(F_H, C_WHITE, it->title); draw_tex(w, ix, Y + 1);
     draw_tex(&it->tName, ix, Y);
     break; }
+  case K_RULE: {
+    card(X, Y, it->w, it->h);
+    int tx = X + 30;
+    if (it->msg) {
+      static const uint32_t AC[4] = { C_GREEN, C_BLUE, C_ORANGE, C_RED };
+      badge(X + 30, Y + 18, it->msg, it->id ? C_SEC2 : AC[it->icon & 3]);
+      tx += badge_w(it->msg) + 14;
+    }
+    int ty = Y + 18;
+    if (it->tName.t) { draw_tex(&it->tName, tx, ty); if (it->act) badge(tx + it->tName.w + 10, ty + 1, "Instant ban", C_RED); ty += it->tName.h + 6; }
+    if (it->tBody.t) draw_tex(&it->tBody, tx, ty);
+    break; }
   case K_INFO:
     if (it->tBody.t) draw_tex(&it->tBody, X + 4, Y + 10);
     break;
@@ -2976,7 +3032,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
     break;
   case K_ACTION: {
     const char *t = it->title ? it->title : "";
-    int bw = btn_w(t, 0); if (it->act == A_SEND || it->act == A_UPDATE) bw = it->w;
+    int bw = btn_w(t, 0); if (it->act == A_SEND || it->act == A_UPDATE || it->act == A_RULESOK) bw = it->w;
     int bx = it->act == A_SEND || it->act == A_UPDATE ? X : X;
     draw_btn(bx, Y + 8, bw, 48, t, it->act == A_SIGNOUT ? 1 : it->act == A_MODE ? 1 : 0, focus);
     break; }
@@ -3110,7 +3166,7 @@ static void draw_item(Screen *s, Item *it, int X, int Y, int focus) {
 
 /* ------------------------------------------------------------------ chrome: header, footer */
 typedef struct { int x, w; } TabR;
-static TabR tabR[NTABS]; static int signinX, signinW, noteX;
+static TabR tabR[NTABS]; static int signinX, signinW, noteX, rulesX;
 static SDL_Texture *iconTex[5];
 static void make_icons(void) {
   for (int i = 0; i < 5; i++) {
@@ -3129,7 +3185,7 @@ static void draw_header(void) {
 #if STAGE >= 2
   if (me.id) names[4] = "Profile";
 #endif
-  int w = 104, x = 540;
+  int w = 104, x = 500;
   for (int i = 0; i < NTABS; i++) {
     int tw = i == 1 ? 128 : w;
     tabR[i] = (TabR){ x, tw };
@@ -3144,7 +3200,8 @@ static void draw_header(void) {
   noteX = x + 10;
   { SDL_Rect d = { noteX, 22, 32, 32 }; SDL_SetTextureAlphaMod(icoNote, auMusic ? 255 : 110); SDL_RenderCopy(R, icoNote, NULL, &d); SDL_SetTextureAlphaMod(icoNote, 255);
     if (!auMusic) { setc(0xe5322d); for (int k = -1; k <= 1; k++) SDL_RenderDrawLine(R, noteX + 2 + k, 52, noteX + 30 + k, 24); } }
-  { SDL_Rect d = { x + 52, 23, 26, 30 }; SDL_RenderCopy(R, icoDoc, NULL, &d); }
+  rulesX = x + 52;
+  { SDL_Rect d = { x + 52, 23, 26, 30 }; if (cur() && cur()->kind == S_RULES) SDL_SetTextureColorMod(icoDoc, 0x5a, 0xc8, 0x00); SDL_RenderCopy(R, icoDoc, NULL, &d); SDL_SetTextureColorMod(icoDoc, 255, 255, 255); }
 #if STAGE >= 2
   if (!me.id) { signinW = 100; signinX = SW - 24 - signinW; draw_btn(signinX, 19, signinW, 38, "Sign in", 0, 0); }
   else signinW = 0;
@@ -3234,6 +3291,7 @@ int main(int argc, char **argv) {
   roots[2] = new_screen(S_PLAZA);
   roots[3] = new_screen(S_GAMES);
   go_tab(0);
+  if (!auRules) open_rules(1);   /* first start: read and accept the rules, like the website */
   update_check();
 
   uint32_t holdT = 0; int lastMeId = -1;
@@ -3323,6 +3381,7 @@ int main(int argc, char **argv) {
         if (touchTapY < TOPH) {
           for (int i = 0; i < NTABS; i++) if (touchTapX >= tabR[i].x && touchTapX < tabR[i].x + tabR[i].w) go_tab(i);
           if (touchTapX >= noteX - 6 && touchTapX < noteX + 40) { auMusic = !auMusic; au_save(); toast(auMusic ? "Music on" : "Music off"); }
+          else if (touchTapX >= rulesX - 8 && touchTapX < rulesX + 38 && !(cur() && cur()->kind == S_RULES)) { sfx(3); open_rules(0); }
 #if STAGE >= 2
           if (signinW && touchTapX >= signinX && touchTapX < signinX + signinW) open_login();
 #endif
