@@ -35,7 +35,7 @@ enum { VT_VIBE, VT_EP, VT_BASS, VT_FLUTE };
 typedef struct { float f, ph, ph2, env, amp, pan, att, dec, rel; int type, gate, age; } AVoice;
 #define NVOICE 20
 static AVoice vo[NVOICE];
-static float kickPh, kickEnv, rimEnv, rimPh, hatEnv, hatAcc, hatLp, hatHp, sfxPh, sfxEnv, sfxF, sfxF2;
+static float kickPh, kickEnv, rimEnv, rimPh, hatEnv, hatAcc, hatLp, sfxPh, sfxEnv, sfxF, sfxF2;
 static uint32_t auNoise = 12345;
 static long auSample;
 static int auTick = -1;
@@ -176,11 +176,12 @@ static void au_callback(void *u, Uint8 *stream, int len) {
   }
 }
 #define SETTINGS_FILE "fs:/vol/external01/wiiu/apps/aeroverse_settings.txt"
-static void au_save(void) { FILE *f = fopen(SETTINGS_FILE, "w"); if (f) { fprintf(f, "music=%d\n", auMusic); fclose(f); } }
+static int auRules;   /* rules accepted once on this console */
+static void au_save(void) { FILE *f = fopen(SETTINGS_FILE, "w"); if (f) { fprintf(f, "music=%d\nrules=%d\n", auMusic, auRules); fclose(f); } }
 static void au_init(void) {
   for (int i = 0; i < 4096; i++) sinT[i] = sinf(i * 6.2831853f / 4096);
   FILE *f = fopen(SETTINGS_FILE, "r");
-  if (f) { int m = 1; if (fscanf(f, "music=%d", &m) == 1) auMusic = m ? 1 : 0; fclose(f); }
+  if (f) { char ln[64]; int v; while (fgets(ln, sizeof ln, f)) { if (sscanf(ln, "music=%d", &v) == 1) auMusic = v ? 1 : 0; else if (sscanf(ln, "rules=%d", &v) == 1) auRules = v ? 1 : 0; } fclose(f); }
   if (SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) return;
   SDL_AudioSpec want, have; SDL_zero(want);
   want.freq = AU_RATE; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024; want.callback = au_callback;
