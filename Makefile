@@ -13,9 +13,9 @@ TOPDIR ?= $(CURDIR)
 # APP_SHORTNAME sets the short name of the application
 # APP_AUTHOR sets the author of the application
 #-------------------------------------------------------------------------------
-#APP_NAME	:= Application Name
-#APP_SHORTNAME	:= App Name
-#APP_AUTHOR	:= Built with devkitPPC & wut
+APP_NAME	:= Aeroverse
+APP_SHORTNAME	:= Aeroverse
+APP_AUTHOR	:= Luk
 
 include $(DEVKITPRO)/wut/share/wut_rules
 
@@ -30,7 +30,7 @@ include $(DEVKITPRO)/wut/share/wut_rules
 # TV_SPLASH is the image displayed during bootup on the TV, leave blank to use default rule
 # DRC_SPLASH is the image displayed during bootup on the DRC, leave blank to use default rule
 #-------------------------------------------------------------------------------
-TARGET		:=	$(notdir $(CURDIR))
+TARGET		:=	aeroverse
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
@@ -46,16 +46,22 @@ DRC_SPLASH	:=
 CFLAGS	:=	-g -Wall -O2 -ffunction-sections \
 			$(MACHDEP)
 
-CFLAGS	+=	$(INCLUDE) -D__WIIU__ -D__WUT__
+# which stage of the app to build (1, 2 or 3) -- see README
+STAGE	?= 3
+
+SDL_INC	:= $(foreach d,$(PORTLIBS),-I$(d)/include/SDL2)
+CFLAGS	+=	$(INCLUDE) $(SDL_INC) -D__WIIU__ -D__WUT__ -DSTAGE=$(STAGE)
 
 CXXFLAGS	:= $(CFLAGS)
 
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-g $(ARCH) $(RPXSPECS) -Wl,-Map,$(notdir $*.map)
 
-# curl's dependencies (brotli always; others only if installed)
-CURL_EXTRA	:= $(foreach l,nghttp2 zstd,$(if $(wildcard $(foreach d,$(PORTLIBS),$(d)/lib/lib$(l).a)),-l$(l)))
-LIBS	:= -Wl,--start-group -lcurl $(CURL_EXTRA) -lbrotlidec -lbrotlicommon -lmbedtls -lmbedx509 -lmbedcrypto -lz -Wl,--end-group -lwut
+# libraries: SDL2 + SDL2_ttf (+ freetype and friends) and curl (+ mbedtls, brotli, zlib)
+# optional ones are linked only if they are installed
+HAVE_LIB = $(if $(wildcard $(foreach d,$(PORTLIBS),$(d)/lib/lib$(1).a)),-l$(1))
+OPT_LIBS	:= $(foreach l,harfbuzz png16 png bz2 nghttp2 zstd,$(call HAVE_LIB,$(l)))
+LIBS	:= -Wl,--start-group -lSDL2_ttf -lSDL2 -lfreetype -lcurl $(OPT_LIBS) -lbrotlidec -lbrotlicommon -lmbedtls -lmbedx509 -lmbedcrypto -lz -lm -Wl,--end-group -lwut
 
 #-------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level
@@ -177,6 +183,12 @@ $(OFILES_SRC)	: $(HFILES_BIN)
 
 #-------------------------------------------------------------------------------
 %.pem.o	%_pem.h :	%.pem
+#-------------------------------------------------------------------------------
+	@echo $(notdir $<)
+	@$(bin2o)
+
+#-------------------------------------------------------------------------------
+%.ttf.o	%_ttf.h :	%.ttf
 #-------------------------------------------------------------------------------
 	@echo $(notdir $<)
 	@$(bin2o)
