@@ -1,0 +1,58 @@
+name: Build Aeroverse for 3DS
+
+on:
+  push:
+    paths:
+      - '3ds/**'
+      - '.github/workflows/build3ds.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    defaults:
+      run:
+        working-directory: 3ds
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check 3DS libraries (curl, mbedTLS)
+        run: |
+          ls /opt/devkitpro/portlibs/3ds/lib || true
+          if [ ! -f /opt/devkitpro/portlibs/3ds/lib/libcurl.a ]; then
+            dkp-pacman -Sy --noconfirm && dkp-pacman -S --needed --noconfirm 3ds-curl 3ds-mbedtls 3ds-zlib || true
+          fi
+          ls /opt/devkitpro/portlibs/3ds/lib | grep -E "curl|mbed|libz" || true
+
+      - name: Prepare (certificates, build number)
+        run: |
+          mkdir -p data out
+          curl -fsSL https://curl.se/ca/cacert.pem -o data/cacert.pem || wget -O data/cacert.pem https://curl.se/ca/cacert.pem
+          echo "#define APP_BUILD ${{ github.run_number }}" > source/build_info.h
+          echo "#define UPDATE_REPO \"${{ github.repository }}\"" >> source/build_info.h
+          cat source/build_info.h
+
+      - name: Build
+        run: |
+          make clean
+          make
+          cp aeroverse.3dsx out/aeroverse.3dsx
+
+      - name: Upload app
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aeroverse_3ds
+          path: 3ds/out/*.3dsx
+
+      - name: Publish update (the 3DS app downloads it from here)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: 3ds-build-${{ github.run_number }}
+          name: Aeroverse for 3DS (build ${{ github.run_number }})
+          make_latest: false
+          files: 3ds/out/aeroverse.3dsx
