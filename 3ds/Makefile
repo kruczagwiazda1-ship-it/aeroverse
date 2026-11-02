@@ -12,9 +12,9 @@ include $(DEVKITARM)/3ds_rules
 
 TARGET		:=	aeroverse
 BUILD		:=	build
-SOURCES		:=	source
+SOURCES		:=	source source/webp/src/dec source/webp/src/dsp source/webp/src/utils
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	include source/webp source/webp/src
 
 APP_TITLE	:=	Aeroverse
 APP_DESCRIPTION	:=	Aeroverse for 3DS
@@ -30,12 +30,9 @@ CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 ASFLAGS	:=	-g $(ARCH)
 LDFLAGS	=	-specs=3dsx.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-# curl + mbedTLS from the 3DS portlibs; WebP avatars only if libwebp is installed
+# curl + mbedTLS from the 3DS portlibs; the WebP decoder (avatars) is built from source/webp
 HAVE_LIB = $(if $(wildcard $(foreach d,$(PORTLIBS),$(d)/lib/lib$(1).a)),-l$(1))
-ifneq (,$(call HAVE_LIB,webp))
-IMG_LIBS	:= -lwebp $(call HAVE_LIB,sharpyuv)
 CFLAGS	+= -DHAVE_WEBP
-endif
 OPT_LIBS	:= $(foreach l,nghttp2 zstd brotlidec brotlicommon,$(call HAVE_LIB,$(l)))
 LIBS	:= -Wl,--start-group $(IMG_LIBS) -lcurl $(OPT_LIBS) -lmbedtls -lmbedx509 -lmbedcrypto -lz -Wl,--end-group -lctru -lm
 

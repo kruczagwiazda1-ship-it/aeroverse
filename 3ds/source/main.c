@@ -3,7 +3,7 @@
  * Same website, same account, same posts as the PC and Wii U versions.
  * Top screen: the selected post / drawing / community big. Bottom screen (touch): lists, buttons, drawing.
  */
-#define APP_VERSION "1.2"
+#define APP_VERSION "1.3"
 #if defined(__has_include)
 #if __has_include("build_info.h")
 #include "build_info.h"
@@ -225,12 +225,12 @@ static void load_token(void) {
   fclose(f);
 }
 static void forget_token(void) { mx_lock(&netMx); sessionTok[0] = 0; mx_unlock(&netMx); remove(LOGIN_FILE); }
-static int rulesOk;
-static void save_settings(void) { FILE *f = fopen(SETTINGS_FILE, "w"); if (f) { fprintf(f, "rules=%d\n", rulesOk); fclose(f); } }
+static int rulesOk, ageOk;
+static void save_settings(void) { FILE *f = fopen(SETTINGS_FILE, "w"); if (f) { fprintf(f, "rules=%d\nage=%d\n", rulesOk, ageOk); fclose(f); } }
 static void load_settings(void) {
   FILE *f = fopen(SETTINGS_FILE, "r"); if (!f) return;
   char ln[64]; int v;
-  while (fgets(ln, sizeof ln, f)) if (sscanf(ln, "rules=%d", &v) == 1) rulesOk = v;
+  while (fgets(ln, sizeof ln, f)) { if (sscanf(ln, "rules=%d", &v) == 1) rulesOk = v; else if (sscanf(ln, "age=%d", &v) == 1) ageOk = v; }
   fclose(f);
 }
 static void me_cb(int serial, long code, const char *body, size_t len, const char *err, int extra) {
@@ -301,10 +301,10 @@ static void update_start(void) {
 /* ------------------------------------------------------------------ screens and items
  * The page is one long column that continues from the top screen onto the bottom screen (like the 3DS browser):
  * the top screen shows the upper part, the bottom screen (touch) the lower part. */
-enum { S_FEED, S_COMMS, S_COMM, S_POST, S_PLAZA, S_GAMES, S_GALLERY, S_USER, S_LOGIN, S_COMPOSE, S_RULES };
+enum { S_FEED, S_COMMS, S_COMM, S_POST, S_PLAZA, S_GAMES, S_GALLERY, S_USER, S_LOGIN, S_COMPOSE, S_RULES, S_NOTIF, S_REPORT, S_EDIT, S_AGE };
 enum { K_POST, K_REPLY, K_COMM, K_SEC, K_INFO, K_ACTION, K_MORE, K_PERSON, K_GAME, K_WIG, K_FIELD, K_RULE, K_PROFILE, K_EMPTY,
-       K_HERO, K_PROMPT, K_CHEAD, K_DCELL };
-enum { A_NONE, A_SEND, A_SIGNOUT, A_RULESOK, A_UPDATE, A_MODE, A_DRAW, A_WIGTOG, A_RETRY, A_RULES };
+       K_HERO, K_PROMPT, K_CHEAD, K_DCELL, K_NOTIF };
+enum { A_NONE, A_SEND, A_SIGNOUT, A_RULESOK, A_UPDATE, A_MODE, A_DRAW, A_WIGTOG, A_RETRY, A_RULES, A_NOTIFS, A_EDIT, A_PASSWORD, A_DELETE, A_REPORT, A_REASON, A_SHIRT, A_AGEYES, A_AGENO };
 
 #define COLW 312
 #define TOP_Y0 26                 /* page area on the top screen: y 26..240 */
@@ -368,6 +368,7 @@ static void free_screen(Screen *s) { clear_items(s, 0); free(s->it); free(s->dra
 static int is_root(Screen *s) { for (int i = 0; i < 5; i++) if (roots[i] == s) return 1; return 0; }
 static void push(Screen *s) { if (depth < MAXS) stack[depth++] = s; else free_screen(s); dirty = 1; }
 static void pop(void) { if (depth <= 1) return; Screen *s = stack[--depth]; if (!is_root(s)) free_screen(s); dirty = 1; }
+static int unread;   /* notifications not read yet */
 static int sel_ok(const Item *it) { return !(it->kind == K_SEC || it->kind == K_INFO || it->kind == K_EMPTY || it->kind == K_RULE || it->kind == K_MORE || it->kind == K_HERO || it->kind == K_PROFILE || it->kind == K_CHEAD); }
 
 static void fill_post(Item *it, cJSON *p) {
@@ -476,6 +477,7 @@ static void measure(Item *it) {
   case K_PROFILE: it->h = PAD + 64 + PAD + (it->plain && *it->plain ? text_wrap(NULL, FM, 14, 0, 0, it->w - 2 * PAD, it->plain, 0, 18, 5) + 6 : 0); break;
   case K_HERO: it->h = 150; break;
   case K_PROMPT: it->h = it->act ? 92 : 56; break;
+  case K_NOTIF: it->h = 58; break;
   }
   item_uncache(it);
 }
@@ -498,10 +500,10 @@ static void add_sec(Screen *s, const char *t) { Item *h = add_item(s, K_SEC); h-
 static void add_info(Screen *s, const char *t) { Item *h = add_item(s, K_INFO); h->body = xstrdup(t); measure(h); }
 static void add_empty(Screen *s, const char *t) { Item *h = add_item(s, K_EMPTY); h->body = xstrdup(t); measure(h); }
 static void add_action(Screen *s, int act, const char *t) { Item *h = add_item(s, K_ACTION); h->act = act; h->title = xstrdup(t); measure(h); }
-static int starts_low(const Screen *s) { return s->kind == S_COMMS || s->kind == S_GAMES || s->kind == S_LOGIN || s->kind == S_COMPOSE || s->kind == S_RULES || s->kind == S_GALLERY; }
+static int starts_low(const Screen *s) { return s->kind == S_COMMS || s->kind == S_GAMES || s->kind == S_LOGIN || s->kind == S_COMPOSE || s->kind == S_RULES || s->kind == S_GALLERY || s->kind == S_REPORT || s->kind == S_EDIT || s->kind == S_AGE || s->kind == S_NOTIF; }
 static void finish(Screen *s) {
   layout(s);
-  int autoSel = s->kind == S_LOGIN || s->kind == S_COMPOSE || s->kind == S_RULES;
+  int autoSel = s->kind == S_LOGIN || s->kind == S_COMPOSE || s->kind == S_RULES || s->kind == S_EDIT || s->kind == S_REPORT || s->kind == S_AGE;
   if (!autoSel) { if (s->sel >= s->n || (s->sel >= 0 && !sel_ok(&s->it[s->sel]))) s->sel = -1; dirty = 1; return; }
   if (s->sel < 0 || s->sel >= s->n || !sel_ok(&s->it[s->sel])) { s->sel = -1; for (int i = 0; i < s->n; i++) if (sel_ok(&s->it[i])) { s->sel = i; break; } }
   dirty = 1;
@@ -554,13 +556,12 @@ static void comms_cb(int serial, long code, const char *body, size_t len, const 
   add_sec(s, "Communities");
   cJSON_ArrayForEach(c, arr) {
     const char *age = jstr(c, "age");
-    if (age && strcmp(age, "all")) continue;   /* all-ages communities only (the age check is on the website) */
     Item *it = add_item(s, K_COMM);
     it->cid = xstrdup(jstr(c, "id")); it->name = xstrdup(jstr(c, "name")); it->body = xstrdup(jstr(c, "description"));
     it->msg = xstrdup(jstr(c, "message")); it->avatar = xstrdup(jstr(c, "thumb")); it->age = xstrdup(age ? age : "all"); it->posts = (int)jnum(c, "posts");
     measure(it);
   }
-  add_info(s, "Starting a new community and communities for older ages are on the website.");
+  add_info(s, "Starting a new community is done on the website (it needs a picture).");
   cJSON_Delete(j);
   finish(s);
 }
@@ -569,9 +570,12 @@ static void post_cb(int serial, long code, const char *body, size_t len, const c
   Screen *s = by_serial(serial); if (!s) return;
   if (code != 200 || !body) { api_error(code, body, err, s->err, sizeof s->err); toast(s->err); return; }
   cJSON *j = cJSON_Parse(body), *p = j ? cJSON_GetObjectItem(j, "post") : NULL;
-  if (cJSON_IsObject(p) && s->n && s->it[0].kind == K_POST) {
+  if (cJSON_IsObject(p)) {
+    if (!(s->n && s->it[0].kind == K_POST)) { add_item(s, K_POST); Item t = s->it[s->n - 1]; memmove(&s->it[1], &s->it[0], sizeof(Item) * (size_t)(s->n - 1)); s->it[0] = t; }
+    int rep = s->it[0].replies;
     item_free(&s->it[0]); memset(&s->it[0], 0, sizeof(Item)); s->it[0].kind = K_POST; s->it[0].w = COLW; s->it[0].full = 1;
-    fill_post(&s->it[0], p); measure(&s->it[0]);
+    fill_post(&s->it[0], p); if (!s->it[0].replies) s->it[0].replies = rep; measure(&s->it[0]);
+    snprintf(s->cname, sizeof s->cname, "%s", s->it[0].name ? s->it[0].name : "");
   }
   cJSON_Delete(j);
   finish(s);
@@ -590,6 +594,10 @@ static void replies_cb(int serial, long code, const char *body, size_t len, cons
   cJSON_ArrayForEach(r, arr) { Item *it = add_item(s, K_REPLY); it->w = COLW - 14; fill_post(it, r); measure(it); }
   if (!n) add_info(s, "No replies yet.");
   add_action(s, A_DRAW, me.id ? "Write a reply" : "Sign in to reply");
+  if (me.id && keep) {
+    if (s->it[0].user && !strcmp(s->it[0].user, me.username)) add_action(s, A_DELETE, "Delete this post");
+    else add_action(s, A_REPORT, "Report this post");
+  }
   if (keep) { s->it[0].replies = n; item_uncache(&s->it[0]); }
   cJSON_Delete(j);
   finish(s);
@@ -610,11 +618,16 @@ static void user_cb(int serial, long code, const char *body, size_t len, const c
   /* the profile card goes first, before posts that may have arrived already */
   if (s->n > 1) { Item t = s->it[s->n - 1]; memmove(&s->it[1], &s->it[0], sizeof(Item) * (size_t)(s->n - 1)); s->it[0] = t; }
   int at = 1;
+  it = &s->it[0];   /* the card moved to the front */
   if (me.id && it->user && !strcmp(it->user, me.username)) {
     Item *w = add_item(s, K_PROMPT); w->act = 1; measure(w);
     { Item t = s->it[s->n - 1]; memmove(&s->it[at + 1], &s->it[at], sizeof(Item) * (size_t)(s->n - 1 - at)); s->it[at] = t; at++; }
-    Item *a = add_item(s, K_ACTION); a->act = A_SIGNOUT; a->title = xstrdup("Sign out"); measure(a);
-    { Item t = s->it[s->n - 1]; memmove(&s->it[at + 1], &s->it[at], sizeof(Item) * (size_t)(s->n - 1 - at)); s->it[at] = t; at++; }
+    static const int ACTS[4] = { A_NOTIFS, A_EDIT, A_PASSWORD, A_SIGNOUT };
+    static const char *AT[4] = { "Notifications", "Edit profile", "Change password", "Sign out" };
+    for (int k = 0; k < 4; k++) {
+      Item *a = add_item(s, K_ACTION); a->act = ACTS[k]; a->title = xstrdup(AT[k]); measure(a);
+      Item t = s->it[s->n - 1]; memmove(&s->it[at + 1], &s->it[at], sizeof(Item) * (size_t)(s->n - 1 - at)); s->it[at] = t; at++;
+    }
     Item *r = add_item(s, K_ACTION); r->act = A_RULES; r->title = xstrdup("Aeroverse Rules"); measure(r);
     { Item t = s->it[s->n - 1]; memmove(&s->it[at + 1], &s->it[at], sizeof(Item) * (size_t)(s->n - 1 - at)); s->it[at] = t; at++; }
   }
@@ -778,6 +791,65 @@ static void plaza_render(Screen *s, Cv *c) {
   if (!np) text_c(c, FB, 14, 200, 120, s->loading ? "Loading the plaza..." : "Nobody is here yet.", C_SEC2);
 }
 
+/* ---- notifications, reports, profile editing, age check (like the website) */
+static void notif_count_cb(int serial, long code, const char *body, size_t len, const char *err, int extra) {
+  (void)serial; (void)len; (void)err; (void)extra;
+  if (code != 200 || !body) return;
+  cJSON *j = cJSON_Parse(body); int n = (int)jnum(j, "unread"); cJSON_Delete(j);
+  if (n != unread) { unread = n; dirty = 1; }
+}
+static void notif_read_cb(int serial, long code, const char *body, size_t len, const char *err, int extra) { (void)serial; (void)code; (void)body; (void)len; (void)err; (void)extra; }
+static void notifs_cb(int serial, long code, const char *body, size_t len, const char *err, int extra) {
+  (void)len; (void)extra;
+  Screen *s = by_serial(serial); if (!s) return;
+  s->loading = 0; clear_items(s, 0);
+  if (code != 200 || !body) { api_error(code, body, err, s->err, sizeof s->err); add_empty(s, s->err); finish(s); return; }
+  add_sec(s, "Notifications");
+  cJSON *j = cJSON_Parse(body), *arr = j ? cJSON_GetObjectItem(j, "notifications") : NULL, *n;
+  int cnt = 0;
+  cJSON_ArrayForEach(n, arr) {
+    Item *it = add_item(s, K_NOTIF);
+    cJSON *a = cJSON_GetObjectItem(n, "actor");
+    it->id = (int)jnum(n, "post_id"); it->created = jnum(n, "created_at"); it->mine = !jbool(n, "read");
+    const char *disp = jstr(a, "display"), *un = jstr(a, "username");
+    it->name = xstrdup(disp && *disp ? disp : un); it->user = xstrdup(un); it->avatar = xstrdup(jstr(a, "avatar"));
+    it->title = xstrdup(jstr(n, "type"));
+    const char *sn = jstr(n, "snippet");
+    it->plain = sn && *sn ? strip_markup(sn, 120) : xstrdup(jbool(n, "has_drawing") ? "Your drawing" : "");
+    measure(it); cnt++;
+  }
+  if (!cnt) add_empty(s, "No notifications yet. When someone gives your post a Yeah! or replies, it shows up here.");
+  cJSON_Delete(j);
+  finish(s);
+  net_send("POST", "/api/notifications/read", "{}", notif_read_cb, 0, 0);
+  unread = 0;
+}
+static void report_items(Screen *s) {
+  add_sec(s, "Report this post");
+  add_info(s, "Why should the admin look at it? Tap a reason.");
+  static const char *R[7] = { "piracy", "modding", "nsfw", "swearing", "harassment", "spam", "other" };
+  static const char *RN[7] = { "Piracy or ROMs", "Console modding help", "NSFW or gore", "Swearing", "Harassment or bullying", "Spam or scam", "Something else" };
+  for (int i = 0; i < 7; i++) { Item *a = add_item(s, K_ACTION); a->act = A_REASON; a->title = xstrdup(RN[i]); a->msg = xstrdup(R[i]); measure(a); }
+}
+static const char *SHIRT_N[12] = { "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "Pink", "Teal", "Brown", "Navy", "White", "Grey" };
+static void edit_items(Screen *s) {
+  add_sec(s, "Edit profile");
+  Item *f = add_item(s, K_FIELD); f->act = 5; f->title = xstrdup("Display name"); f->body = xstrdup(s->cname); measure(f);
+  Item *b = add_item(s, K_FIELD); b->act = 6; b->title = xstrdup("Bio"); b->body = xstrdup(s->text); measure(b);
+  char t[64]; snprintf(t, sizeof t, "Shirt colour: %s (tap to change)", SHIRT_N[s->filter % 12]);
+  Item *sh = add_item(s, K_ACTION); sh->act = A_SHIRT; sh->title = xstrdup(t); measure(sh);
+  add_info(s, "Your picture (avatar) can be changed on the website.");
+  add_action(s, A_SEND, s->loading ? "Saving..." : "Save");
+}
+static void age_items(Screen *s) {
+  char t[160];
+  snprintf(t, sizeof t, "%s is rated %d+", s->cname, s->filter); add_sec(s, t);
+  static const char *INFO[3] = { "Mild language and mild themes. No NSFW.", "Stronger language and more mature topics. No NSFW.", "Adult conversation and strong language. No NSFW." };
+  add_info(s, INFO[s->filter >= 18 ? 2 : s->filter >= 16 ? 1 : 0]);
+  snprintf(t, sizeof t, "Yes, I am %d or older", s->filter); add_action(s, A_AGEYES, t);
+  add_action(s, A_AGENO, "No, go back");
+}
+static void open_post_id(int id);
 static void add_game(Screen *s, int mode, const char *title, const char *body) { Item *g = add_item(s, K_GAME); g->id = mode; g->title = xstrdup(title); g->body = xstrdup(body); measure(g); }
 static void add_rule(Screen *s, int num, const char *title, const char *text, int instant) { Item *r = add_item(s, K_RULE); r->id = num; r->title = xstrdup(title); r->body = xstrdup(text); r->act = instant; measure(r); }
 static void rules_items(Screen *s) {
@@ -798,7 +870,7 @@ static void rules_items(Screen *s) {
 static void rebuild_form(Screen *s);
 static void load_screen(Screen *s, int append) {
   char path[300];
-  if (s->kind == S_LOGIN || s->kind == S_COMPOSE) { rebuild_form(s); return; }
+  if (s->kind == S_LOGIN || s->kind == S_COMPOSE || s->kind == S_EDIT) { rebuild_form(s); return; }
   if (!append) { clear_items(s, 0); s->scroll = starts_low(s) ? (float)-page_topv(s) : 0; s->vel = 0; s->sel = -1; s->lastId = 0; s->page = 0; s->more = 0; s->serial = serialCounter++; }
   s->loading = 1; s->err[0] = 0;
   switch (s->kind) {
@@ -812,7 +884,7 @@ static void load_screen(Screen *s, int append) {
   case S_COMM:
     if (append) snprintf(path, sizeof path, "/api/posts?limit=15&community=%s&before=%d", s->cid, s->lastId);
     else {
-      Item *h = add_item(s, K_CHEAD); h->name = xstrdup(s->cname); h->body = xstrdup(s->text); h->msg = xstrdup(s->text2); h->avatar = xstrdup(s->pass); measure(h);
+      Item *h = add_item(s, K_CHEAD); h->name = xstrdup(s->cname); h->body = xstrdup(s->text); h->msg = xstrdup(s->text2); h->avatar = xstrdup(s->pass); { char ag[8]; snprintf(ag, sizeof ag, "%d", s->filter); h->age = xstrdup(ag); } measure(h);
       Item *p = add_item(s, K_PROMPT); p->act = me.id ? 2 : 0; measure(p);
       add_sec(s, "Posts");
       snprintf(path, sizeof path, "/api/posts?limit=15&community=%s", s->cid);
@@ -849,6 +921,9 @@ static void load_screen(Screen *s, int append) {
     add_empty(s, "More challenges are on the way.");
     break;
   case S_RULES: s->loading = 0; rules_items(s); break;
+  case S_NOTIF: net_send("GET", "/api/notifications", NULL, notifs_cb, s->serial, 0); break;
+  case S_REPORT: s->loading = 0; report_items(s); break;
+  case S_AGE: s->loading = 0; age_items(s); break;
   default: s->loading = 0; break;
   }
   finish(s);
@@ -864,6 +939,7 @@ static void rebuild_form(Screen *s) {
   int keepSel = s->sel;
   if (!s->n) s->scroll = (float)-page_topv(s);
   clear_items(s, 0);
+  if (s->kind == S_EDIT) { edit_items(s); finish(s); if (keepSel >= 0 && keepSel < s->n && sel_ok(&s->it[keepSel])) s->sel = keepSel; return; }
   if (s->kind == S_LOGIN) {
     add_sec(s, s->mode ? "Create an account" : "Sign in to Aeroverse");
     add_info(s, "Use the same account as on the website and the Wii U. Tap a field to type with the keyboard.");
@@ -891,6 +967,11 @@ static void sent_cb(int serial, long code, const char *body, size_t len, const c
   Screen *s = by_serial(serial); if (!s) return;
   s->loading = 0;
   if (code != 200) { char e[200]; api_error(code, body, err, e, sizeof e); toast(e); rebuild_form(s); return; }
+  if (s->kind == S_EDIT) {
+    toast("Profile saved!"); net_send("GET", "/api/me", NULL, me_cb, 0, 0);
+    pop(); Screen *c = cur(); if (c) load_screen(c, 0);
+    return;
+  }
   if (s->kind == S_LOGIN) {   /* the Profile tab turns into the profile when /api/me answers (main loop) */
     save_token(); net_send("GET", "/api/me", NULL, me_cb, 0, 0); toast("Signed in!");
     rebuild_form(s);
@@ -904,7 +985,12 @@ static void sent_cb(int serial, long code, const char *body, size_t len, const c
 static void compose_send(Screen *s) {
   if (s->loading) return;
   cJSON *o = cJSON_CreateObject();
-  if (s->kind == S_LOGIN) {
+  if (s->kind == S_EDIT) {
+    cJSON_AddStringToObject(o, "display", s->cname); cJSON_AddStringToObject(o, "bio", s->text); cJSON_AddNumberToObject(o, "shirt", s->filter % 12);
+    char *b = cJSON_PrintUnformatted(o);
+    net_send("POST", "/api/me", b, sent_cb, s->serial, 0);
+    free(b);
+  } else if (s->kind == S_LOGIN) {
     if (!s->text2[0] || !s->pass[0]) { toast("Type your username and password."); cJSON_Delete(o); return; }
     cJSON_AddStringToObject(o, "username", s->text2); cJSON_AddStringToObject(o, "password", s->pass);
     if (s->mode) { cJSON_AddStringToObject(o, "display", s->cname[0] ? s->cname : s->text2); cJSON_AddTrueToObject(o, "rules"); }
@@ -950,6 +1036,12 @@ static void do_yeah(Screen *s, Item *it) {
   it->mine = !it->mine; it->yeahs += it->mine ? 1 : -1; item_uncache(it);
   net_send("POST", path, "{}", yeah_cb, s->serial, it->id);
   dirty = 1;
+}
+static void sent_cb2_reply(int serial, long code, const char *body, size_t len, const char *err, int extra) {
+  (void)len; (void)extra;
+  if (code != 200) { char e[200]; api_error(code, body, err, e, sizeof e); toast(e); return; }
+  toast("Reply deleted.");
+  Screen *s = by_serial(serial); if (s) { char path[64]; snprintf(path, sizeof path, "/api/posts/%d/replies", s->postId); net_send("GET", path, NULL, replies_cb, s->serial, 0); }
 }
 static void signout_cb(int serial, long code, const char *body, size_t len, const char *err, int extra) { (void)serial; (void)code; (void)body; (void)len; (void)err; (void)extra; }
 
@@ -1357,6 +1449,7 @@ static void draw_item(Cv *c, Screen *s, Item *it, int X, int Y) {
     text_fit(c, FB, 16, X + 64, Y + 6, it->name, C_INK, it->w - 72);
     text_fit(c, FM, 13, X + 64, Y + 26, it->body, C_SOFT, it->w - 72);
     snprintf(buf, sizeof buf, "%d posts", it->posts); text(c, FB, 11, X + 64, Y + 43, buf, C_GREEN_D);
+    { int ag = it->age ? atoi(it->age) : 0; if (ag) { char al[8]; snprintf(al, sizeof al, "%d+", ag); uint32_t ac = ag >= 18 ? C_RED : ag >= 16 ? C_ORANGE : C_BLUE; rrect(c, X + it->w - 40, Y + 42, 32, 15, 3, ac); text_c(c, FB, 10, X + it->w - 24, Y + 43, al, C_WHITE); } }
     break; }
   case K_CHEAD: {
     card(c, X, Y, it->w, it->h);
@@ -1364,7 +1457,8 @@ static void draw_item(Cv *c, Screen *s, Item *it, int X, int Y) {
     if (p) pic_draw_sq(c, p, X + 12, Y + 12, 56);
     else { fill(c, X + 12, Y + 12, 56, 56, C_GREEN); char l[2] = { it->name && *it->name ? it->name[0] : '?', 0 }; text_c(c, FB, 32, X + 40, Y + 22, l, C_WHITE); }
     text_fit(c, FB, 18, X + 78, Y + 12, it->name, C_INK, it->w - 90);
-    rrect(c, X + 78, Y + 38, 60, 18, 3, C_GREEN); text_c(c, FB, 11, X + 108, Y + 40, "All ages", C_WHITE);
+    { int ag = it->age ? atoi(it->age) : 0; const char *al = ag >= 18 ? "18+" : ag >= 16 ? "16+" : ag >= 14 ? "14+" : "All ages"; uint32_t ac = ag >= 18 ? C_RED : ag >= 16 ? C_ORANGE : ag >= 14 ? C_BLUE : C_GREEN;
+      rrect(c, X + 78, Y + 38, 60, 18, 3, ac); text_c(c, FB, 11, X + 108, Y + 40, al, C_WHITE); }
     int y = Y + 76;
     y += text_wrap(c, FM, 13, X + 12, y, it->w - 24, it->body, C_SOFT, 17, 3);
     if (it->msg && *it->msg) { fill(c, X, y + 6, it->w, 1, 0xe3ecf0); text(c, FB, 10, X + 12, y + 12, "MESSAGE FROM THE CREATOR", C_SOFT); text_wrap(c, FM, 14, X + 12, y + 28, it->w - 24, it->msg, C_INK, 18, 4); }
@@ -1377,7 +1471,7 @@ static void draw_item(Cv *c, Screen *s, Item *it, int X, int Y) {
     break; }
   case K_INFO: text_wrap(c, FM, 13, X + 4, Y + 2, it->w - 8, it->body, C_SEC2, 18, 0); break;
   case K_EMPTY: card(c, X, Y, it->w, it->h); text_wrap(c, FM, 14, X + 14, Y + 17, it->w - 28, it->body, C_SOFT, 19, 0); break;
-  case K_ACTION: pill(c, X + 8, Y + 2, it->w - 16, 30, it->title, it->act == A_SIGNOUT || it->act == A_MODE || it->act == A_RULES || it->act == A_WIGTOG ? 1 : it->act == A_UPDATE ? 4 : (s->kind == S_GALLERY && s->mode) ? 5 : 0); break;
+  case K_ACTION: pill(c, X + 8, Y + 2, it->w - 16, 30, it->title, it->act == A_SIGNOUT || it->act == A_MODE || it->act == A_RULES || it->act == A_WIGTOG || it->act == A_SHIRT || it->act == A_AGENO || it->act == A_PASSWORD ? 1 : it->act == A_UPDATE ? 4 : (s->kind == S_GALLERY && s->mode) ? 5 : 0); break;
   case K_MORE: text_c(c, FB, 12, X + it->w / 2, Y + 7, "Loading more...", C_SEC2); break;
   case K_PERSON: {
     card(c, X, Y, it->w, it->h);
@@ -1445,6 +1539,16 @@ static void draw_item(Cv *c, Screen *s, Item *it, int X, int Y) {
     }
     text_c(c, FM, 12, X + it->w / 2, Y + 128, me.id > 0 ? "Welcome back! Scroll down for the latest posts." : "Sign in on the Profile tab to post and draw.", C_SEC2);
     break; }
+  case K_NOTIF: {
+    card(c, X, Y, it->w, it->h);
+    if (it->mine) circle(c, X + it->w - 12, Y + 12, 5, C_RED);
+    draw_avatar(c, it->name, it->user, it->avatar, X + PAD, Y + PAD, 40);
+    snprintf(buf, sizeof buf, "%s %s", it->name ? it->name : "", it->title && !strcmp(it->title, "reply") ? "replied to your post" : "gave your post a Yeah!");
+    text_fit(c, FB, 13, X + 56, Y + 7, buf, C_INK, it->w - 76);
+    char ago[40]; fmt_ago(it->created, ago, sizeof ago);
+    if (it->plain && *it->plain) snprintf(buf, sizeof buf, "\"%s\" - %s", it->plain, ago); else snprintf(buf, sizeof buf, "%s", ago);
+    text_fit(c, FM, 12, X + 56, Y + 28, buf, C_SOFT, it->w - 64);
+    break; }
   case K_PROMPT: {
     card(c, X, Y, it->w, it->h);
     if (!it->act) {
@@ -1501,6 +1605,10 @@ static void top_banner(Screen *s, int off) {
   case S_RULES: t = s->mode ? "Welcome to Aeroverse!" : "Aeroverse Rules"; d = s->mode ? "Please read the rules on the bottom screen and accept them to continue." : "Everyone who uses Aeroverse follows these rules."; break;
   case S_GALLERY: t = s->mode ? "Ultra Wiggle Paint" : "Super Wiggle Paint"; d = "Tap Draw! to play. Drawings from everybody are in the gallery below."; break;
   case S_COMPOSE: t = s->ckind == 1 ? "Write a reply" : "New post"; d = ""; break;
+  case S_NOTIF: t = "Notifications"; d = "Yeah!s and replies to your posts. Tap one to open the post."; break;
+  case S_REPORT: t = "Report"; d = "Tell the admin what is wrong. Reports are private."; break;
+  case S_EDIT: t = "Edit profile"; d = "Change your name, bio and the colour of your shirt on the Plaza."; break;
+  case S_AGE: t = "Age check"; d = "This community is for older players. Please confirm your age."; break;
   default: t = ""; d = ""; break;
   }
   if (s->kind == S_COMPOSE) {
@@ -1551,20 +1659,21 @@ static void draw_page(Screen *s) {
 
 /* ---- action bar (above the tabs) */
 typedef struct { const char *t; int id; int style; } Btn;
-enum { B_BACK = 1, B_WRITE, B_REFRESH, B_YEAH, B_REPLY, B_DRAW, B_FILTER, B_SEND, B_OPEN, B_ACCEPT };
+enum { B_BACK = 1, B_WRITE, B_REFRESH, B_YEAH, B_REPLY, B_DRAW, B_FILTER, B_SEND, B_OPEN, B_ACCEPT, B_ALERTS };
 static int bar_buttons(Screen *s, Btn *b) {
   int n = 0;
   if (depth > 1 && !(s->kind == S_RULES && s->mode)) b[n++] = (Btn){ "Back", B_BACK, 1 };
   Item *sel = s->sel >= 0 && s->sel < s->n ? &s->it[s->sel] : NULL;
   switch (s->kind) {
-  case S_FEED: b[n++] = (Btn){ "Write", B_WRITE, 0 }; b[n++] = (Btn){ "Refresh", B_REFRESH, 1 }; break;
+  case S_FEED: b[n++] = (Btn){ "Write", B_WRITE, 0 }; if (me.id) { static char nb[24]; snprintf(nb, sizeof nb, unread ? "Alerts (%d)" : "Alerts", unread); b[n++] = (Btn){ nb, B_ALERTS, unread ? 4 : 1 }; } b[n++] = (Btn){ "Refresh", B_REFRESH, 1 }; break;
+  case S_NOTIF: b[n++] = (Btn){ "Refresh", B_REFRESH, 1 }; break;
   case S_COMMS: b[n++] = (Btn){ "Refresh", B_REFRESH, 1 }; break;
   case S_PLAZA: b[n++] = (Btn){ "Filter", B_FILTER, 1 }; b[n++] = (Btn){ "Refresh", B_REFRESH, 1 }; break;
   case S_COMM: b[n++] = (Btn){ "Write here", B_WRITE, 0 }; break;
   case S_POST: b[n++] = (Btn){ "Yeah!", B_YEAH, s->n && s->it[0].kind == K_POST && s->it[0].mine ? 3 : 2 }; b[n++] = (Btn){ "Reply", B_REPLY, 0 }; break;
   case S_GALLERY: b[n++] = (Btn){ "Draw!", B_DRAW, s->mode ? 5 : 0 }; if (sel && sel->kind == K_WIG) b[n++] = (Btn){ "Yeah!", B_YEAH, sel->mine ? 3 : 2 }; break;
   case S_USER: if (me.id && !strcmp(s->cid, me.username)) b[n++] = (Btn){ "Write", B_WRITE, 0 }; else b[n++] = (Btn){ "Refresh", B_REFRESH, 1 }; break;
-  case S_COMPOSE: b[n++] = (Btn){ "Send", B_SEND, 0 }; break;
+  case S_COMPOSE: case S_EDIT: b[n++] = (Btn){ s->kind == S_EDIT ? "Save" : "Send", B_SEND, 0 }; break;
   case S_RULES: if (s->mode) b[n++] = (Btn){ "I accept the rules", B_ACCEPT, 0 }; break;
   default: break;
   }
@@ -1619,13 +1728,14 @@ static void draw_header(Screen *s) {
   Cv *c = &TOP;
   vgrad(c, 0, 0, 400, 25, 0xffffff, 0xe3f3fb); fill(c, 0, 25, 400, 1, 0x8fd4f2);
   img_draw(c, &logoSm, 6, 3, 100, 20, 0, 255);
-  static const char *SN[11] = { "Home", "Communities", "Community", "Post", "Plaza", "Games", "Gallery", "Profile", "Sign in", "Write", "Rules" };
+  static const char *SN[15] = { "Home", "Communities", "Community", "Post", "Plaza", "Games", "Gallery", "Profile", "Sign in", "Write", "Rules", "Notifications", "Report", "Edit profile", "Age check" };
   char title[120]; snprintf(title, sizeof title, "%s", s ? SN[s->kind] : "");
   if (s && (s->kind == S_COMM || s->kind == S_GALLERY) && s->cname[0]) snprintf(title, sizeof title, "%s", s->cname);
   if (s && s->kind == S_USER && s->n && s->it[0].kind == K_PROFILE && s->it[0].name) snprintf(title, sizeof title, "%s", s->it[0].name);
   int w = text_w(FB, 14, title); if (w > 230) w = 230;
   text_fit(c, FB, 14, 394 - w, 4, title, C_SEC2, 230);
   if (net_pending()) { int k = (int)(nowMs / 120) % 6; for (int i = 0; i < 6; i++) fill(c, 394 - w - 48 + i * 7, 10, 4, 4, i == k ? C_GREEN : 0xc8dfe8); }
+  if (unread > 0) { char nb[8]; snprintf(nb, sizeof nb, "%d", unread > 99 ? 99 : unread); int bw = text_w(FB, 11, nb) + 10; rrect(c, 112, 5, bw, 16, 8, C_RED); text(c, FB, 11, 117, 6, nb, C_WHITE); }
   if (toastMsg[0] && nowMs < toastUntil) {
     int tw = text_w(FB, 12, toastMsg) + 28; if (tw > 390) tw = 390;
     rrect(c, 200 - tw / 2, 206, tw, 28, 14, 0xe62d5d78);
@@ -1645,6 +1755,31 @@ static void draw_all(void) {
 }
 
 /* ------------------------------------------------------------------ actions */
+static void pw_cb(int serial, long code, const char *body, size_t len, const char *err, int extra) {
+  (void)serial; (void)len; (void)extra;
+  if (code != 200) { char e[200]; api_error(code, body, err, e, sizeof e); toast(e); return; }
+  toast("Password changed!");
+}
+static void report_cb(int serial, long code, const char *body, size_t len, const char *err, int extra) {
+  (void)serial; (void)len; (void)extra;
+  if (code != 200) { char e[200]; api_error(code, body, err, e, sizeof e); toast(e); return; }
+  toast("Thanks! The admin will take a look.");
+}
+static void deleted_cb(int serial, long code, const char *body, size_t len, const char *err, int extra) {
+  (void)serial; (void)len; (void)extra;
+  if (code != 200) { char e[200]; api_error(code, body, err, e, sizeof e); toast(e); return; }
+  toast("Deleted.");
+  Screen *c = cur(); if (c && c->kind == S_POST) pop();
+  c = cur(); if (c) load_screen(c, 0);
+}
+static void open_post_id(int id) {
+  Screen *p = new_screen(S_POST); p->postId = id; push(p);
+  Item *f = add_item(p, K_POST); f->full = 1; f->id = id; f->plain = xstrdup("Loading..."); measure(f);
+  finish(p); p->sel = 0;
+  char path[64];
+  snprintf(path, sizeof path, "/api/posts/%d", id); net_send("GET", path, NULL, post_cb, p->serial, 0);
+  snprintf(path, sizeof path, "/api/posts/%d/replies", id); p->loading = 1; net_send("GET", path, NULL, replies_cb, p->serial, 0);
+}
 static void go_tab(int t) {
   if (t < 0) t = 4;
   if (t > 4) t = 0;
@@ -1669,9 +1804,21 @@ static void open_item(Screen *s, Item *it, int tx, int ty) {
   switch (it->kind) {
   case K_POST: if (s->kind != S_POST) open_post(s, it); break;
   case K_DCELL: open_post(s, it); break;
-  case K_REPLY: break;
+  case K_REPLY:
+    if (me.id && it->user && !strcmp(it->user, me.username)) {
+      static int armId; static uint32_t armT;
+      if (armId == it->id && nowMs - armT < 4000) { char path[64]; snprintf(path, sizeof path, "/api/replies/%d", it->id); net_send("DELETE", path, NULL, sent_cb2_reply, s->serial, it->id); armId = 0; }
+      else { armId = it->id; armT = nowMs; toast("Tap your reply again to delete it."); }
+    } else if (me.id) { Screen *r = new_screen(S_REPORT); r->ckind = 1; r->postId = it->id; push(r); load_screen(r, 0); }
+    break;
+  case K_NOTIF: if (it->id) open_post_id(it->id); break;
   case K_COMM: { Screen *c = new_screen(S_COMM); snprintf(c->cid, sizeof c->cid, "%s", it->cid ? it->cid : ""); snprintf(c->cname, sizeof c->cname, "%s", it->name ? it->name : "");
     snprintf(c->text, sizeof c->text, "%s", it->body ? it->body : ""); snprintf(c->text2, sizeof c->text2, "%s", it->msg ? it->msg : ""); snprintf(c->pass, sizeof c->pass, "%s", it->avatar ? it->avatar : "");
+    { Item *h0 = NULL; (void)h0; }
+    c->filter = it->age ? atoi(it->age) : 0;
+    if (c->filter > ageOk) { Screen *g = new_screen(S_AGE); g->filter = c->filter; snprintf(g->cname, sizeof g->cname, "%s", c->cname); free_screen(c); g->postId = 0;
+      snprintf(g->cid, sizeof g->cid, "%s", it->cid ? it->cid : ""); snprintf(g->text, sizeof g->text, "%s", it->body ? it->body : ""); snprintf(g->text2, sizeof g->text2, "%s", it->msg ? it->msg : ""); snprintf(g->pass, sizeof g->pass, "%s", it->avatar ? it->avatar : "");
+      push(g); load_screen(g, 0); break; }
     push(c); load_screen(c, 0); break; }
   case K_PERSON: { Screen *u = new_screen(S_USER); snprintf(u->cid, sizeof u->cid, "%s", it->user ? it->user : ""); push(u); load_screen(u, 0); break; }
   case K_GAME: { Screen *g = new_screen(S_GALLERY); g->mode = it->id; snprintf(g->cname, sizeof g->cname, "%s", it->title); push(g); load_screen(g, 0); break; }
@@ -1688,6 +1835,8 @@ static void open_item(Screen *s, Item *it, int tx, int ty) {
     else if (it->act == 3) { if (plat_keyboard("Display name", s->cname, tmp, 40, 0, 0)) snprintf(s->cname, sizeof s->cname, "%s", tmp); }
     else if (it->act == 1) { if (plat_keyboard(s->ckind == 1 ? "Write a reply" : "Write a post", s->text, tmp, 1000, 0, 1)) snprintf(s->text, sizeof s->text, "%s", tmp); }
     else if (it->act == 4) { ed_open(s, 0, 0); return; }
+    else if (it->act == 5) { if (plat_keyboard("Display name", s->cname, tmp, 24, 0, 0)) snprintf(s->cname, sizeof s->cname, "%s", tmp); }
+    else if (it->act == 6) { if (plat_keyboard("Bio", s->text, tmp, 200, 0, 1)) snprintf(s->text, sizeof s->text, "%s", tmp); }
     swallow = 1;
     rebuild_form(s);
     break; }
@@ -1701,6 +1850,39 @@ static void open_item(Screen *s, Item *it, int tx, int ty) {
     case A_MODE: s->mode = !s->mode; s->sel = -1; rebuild_form(s); break;
     case A_WIGTOG: s->drawWig = s->drawWig ? 0 : 3; rebuild_form(s); break;
     case A_RETRY: load_screen(s, 0); break;
+    case A_NOTIFS: { Screen *n = new_screen(S_NOTIF); push(n); load_screen(n, 0); break; }
+    case A_EDIT: {
+      Screen *e = new_screen(S_EDIT);
+      Item *pr = s->n && s->it[0].kind == K_PROFILE ? &s->it[0] : NULL;
+      snprintf(e->cname, sizeof e->cname, "%s", me.display); snprintf(e->text, sizeof e->text, "%s", pr && pr->body ? pr->body : ""); e->filter = pr ? ((pr->icon % 12) + 12) % 12 : 0;
+      push(e); rebuild_form(e); break; }
+    case A_SHIRT: s->filter = (s->filter + 1) % 12; rebuild_form(s); break;
+    case A_PASSWORD: {
+      char cur_[128], nx[128];
+      if (!plat_keyboard("Your current password", "", cur_, 100, 1, 0)) { swallow = 1; break; }
+      if (!plat_keyboard("New password (8 or more characters)", "", nx, 100, 1, 0)) { swallow = 1; break; }
+      swallow = 1;
+      cJSON *o = cJSON_CreateObject(); cJSON_AddStringToObject(o, "current", cur_); cJSON_AddStringToObject(o, "next", nx);
+      char *b = cJSON_PrintUnformatted(o); net_send("POST", "/api/me/password", b, pw_cb, 0, 0); free(b); cJSON_Delete(o);
+      memset(cur_, 0, sizeof cur_); memset(nx, 0, sizeof nx);
+      toast("Changing the password..."); break; }
+    case A_DELETE: {
+      static uint32_t armT; static int armId;
+      int pid = s->postId;
+      if (armId == pid && nowMs - armT < 4000) { char path[64]; snprintf(path, sizeof path, "/api/posts/%d", pid); net_send("DELETE", path, NULL, deleted_cb, 0, 0); armId = 0; }
+      else { armId = pid; armT = nowMs; toast("Tap Delete again to delete this post."); }
+      break; }
+    case A_REPORT: { Screen *r = new_screen(S_REPORT); r->ckind = 0; r->postId = s->postId; push(r); load_screen(r, 0); break; }
+    case A_REASON: {
+      cJSON *o = cJSON_CreateObject(); cJSON_AddStringToObject(o, "type", s->ckind == 1 ? "reply" : s->ckind == 2 ? "wiggle" : "post"); cJSON_AddNumberToObject(o, "id", s->postId); cJSON_AddStringToObject(o, "reason", it->msg ? it->msg : "other");
+      char *b = cJSON_PrintUnformatted(o); net_send("POST", "/api/reports", b, report_cb, 0, 0); free(b); cJSON_Delete(o);
+      pop(); break; }
+    case A_AGEYES: {
+      ageOk = s->filter > ageOk ? s->filter : ageOk; save_settings();
+      Screen *c = new_screen(S_COMM); c->filter = s->filter;
+      snprintf(c->cid, sizeof c->cid, "%s", s->cid); snprintf(c->cname, sizeof c->cname, "%s", s->cname); snprintf(c->text, sizeof c->text, "%s", s->text); snprintf(c->text2, sizeof c->text2, "%s", s->text2); snprintf(c->pass, sizeof c->pass, "%s", s->pass);
+      pop(); push(c); load_screen(c, 0); break; }
+    case A_AGENO: pop(); break;
     case A_DRAW:
       if (s->kind == S_GALLERY) { if (!me.id) toast("Sign in first (Profile tab)."); else ed_open(NULL, 1, s->mode); }
       else if (s->kind == S_POST) open_compose(1, NULL, s->cname, s->postId);
@@ -1723,6 +1905,7 @@ static void bar_press(Screen *s, int id) {
   case B_SEND: compose_send(s); break;
   case B_OPEN: if (sel) open_item(s, sel, -1, -1); break;
   case B_ACCEPT: rulesOk = 1; save_settings(); pop(); toast("Thanks! Have fun on Aeroverse."); break;
+  case B_ALERTS: { Screen *nn = new_screen(S_NOTIF); push(nn); load_screen(nn, 0); break; }
   }
   dirty = 1;
 }
@@ -1786,6 +1969,7 @@ int main(int argc, char **argv) {
       if (curTab == 4 && cur() == roots[4]) go_tab(4);
     }
     if (in.down & KEY_START_) break;
+    { static uint32_t nextPoll; if (me.id > 0 && nowMs > nextPoll) { nextPoll = nowMs + 60000; net_send("GET", "/api/notifications/count", NULL, notif_count_cb, 0, 0); } }
     if (swallow) { if (in.touch) in.touch = 0; else swallow = 0; }
     if (ed.on) {
       ed_tick();

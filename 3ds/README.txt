@@ -1,4 +1,4 @@
-Aeroverse for Nintendo 3DS (Homebrew Launcher) - version 1.1
+Aeroverse for Nintendo 3DS (Homebrew Launcher) - version 1.3
 
 Same account, posts, communities and drawings as the website and the Wii U app.
 Top screen: the selected post / drawing / community, big. Bottom screen (touch): lists, buttons, drawing.
