@@ -72,3 +72,11 @@ jobs:
           files: |
             out/aeroverse.wuhb
             out/version.txt
+
+      - name: Tell Discord about the new build
+        if: success()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_WIIU }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "No Discord webhook set, skipping"; exit 0; fi
+          curl -fsS -H "Content-Type: application/json" -d '{"username":"Aeroverse Builds","content":"🎮 **New Wii U build #${{ github.run_number }} is out!**\n⬇️ Download: https://aeroverse.online/download/wiiu"}' "$HOOK" || true
