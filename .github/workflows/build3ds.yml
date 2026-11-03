@@ -56,3 +56,11 @@ jobs:
           name: Aeroverse for 3DS (build ${{ github.run_number }})
           make_latest: false
           files: 3ds/out/aeroverse.3dsx
+
+      - name: Tell Discord about the new build
+        if: success()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_3DS }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "No Discord webhook set, skipping"; exit 0; fi
+          curl -fsS -H "Content-Type: application/json" -d '{"username":"Aeroverse Builds","content":"🕹️ **New 3DS build #${{ github.run_number }} is out!**\n⬇️ Download: https://aeroverse.online/download/3ds"}' "$HOOK" || true
