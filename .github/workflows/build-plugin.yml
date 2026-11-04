@@ -28,3 +28,10 @@ jobs:
           name: Aeroverse Button (Wii U plugin)
           files: wiiu-plugin/AeroverseButton.wps
           make_latest: false
+      - name: Tell Discord about the new plugin
+        if: success()
+        env:
+          HOOK: ${{ secrets.DISCORD_WEBHOOK_PLUGIN }}
+        run: |
+          if [ -z "$HOOK" ]; then echo "No Discord webhook set, skipping"; exit 0; fi
+          curl -fsS -H "Content-Type: application/json" -d '{"username":"Aeroverse Plugins","content":"🧩 **New Wii U plugin build #${{ github.run_number }}!** (Aeroverse Button)\n⬇️ https://github.com/${{ github.repository }}/releases/download/plugin-latest/AeroverseButton.wps\n📁 SD: `wiiu/environments/aroma/plugins/`"}' "$HOOK" || true
