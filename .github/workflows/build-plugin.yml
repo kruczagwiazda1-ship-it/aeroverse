@@ -1,0 +1,30 @@
+name: Build Wii U plugin (Aeroverse Button)
+
+on:
+  push:
+    paths: ['wiiu-plugin/**', '.github/workflows/build-plugin.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build docker image
+        run: docker build -t aeroplugin wiiu-plugin
+      - name: Compile .wps
+        run: docker run --rm -v ${{ github.workspace }}/wiiu-plugin:/project aeroplugin make -f build.mk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AeroverseButton
+          path: wiiu-plugin/AeroverseButton.wps
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: plugin-latest
+          name: Aeroverse Button (Wii U plugin)
+          files: wiiu-plugin/AeroverseButton.wps
+          make_latest: false
