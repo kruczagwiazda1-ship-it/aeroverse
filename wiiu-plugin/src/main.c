@@ -9,9 +9,15 @@
 #include <rpxloader/rpxloader.h>
 #include <sysapp/switch.h>
 #include <coreinit/title.h>
+#include <coreinit/filesystem.h>
+#include <nn/acp/title.h>
+#include <ctype.h>
+#include "icon_tga.h"
 #include <sys/stat.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdint.h>
 
 WUPS_PLUGIN_NAME("Aeroverse Button");
 WUPS_PLUGIN_DESCRIPTION("Wybrany przycisk Wii U Menu otwiera Aeroverse");
@@ -116,7 +122,7 @@ ON_APPLICATION_START() {
     /* Tryb awaryjny: gdy jednak wystartuje aplet Miiverse, przeskocz do Aeroverse */
     if (gFallback && gMode == MODE_MIIVERSE) {
         uint64_t tid = OSGetTitleID();
-        if (tid == 0x0005003010016000ULL || tid == 0x0005003010016100ULL || tid == 0x0005003010016200ULL)
+        if ((uint32_t)(tid >> 32) == 0x00050030 && (((uint32_t) tid) >> 12) == 0x10016) /* aplet Miiverse, kazdy region */
             launchAeroverse();
     }
 }
@@ -143,3 +149,108 @@ DECL_FUNCTION(int32_t, _SYSDirectlySwitchTo, SysAppPFID pfid) {
 WUPS_MUST_REPLACE_FOR_PROCESS(SYSSwitchTo, WUPS_LOADER_LIBRARY_SYSAPP, SYSSwitchTo, WUPS_FP_TARGET_PROCESS_WII_U_MENU);
 WUPS_MUST_REPLACE_FOR_PROCESS(_SYSSwitchTo, WUPS_LOADER_LIBRARY_SYSAPP, _SYSSwitchTo, WUPS_FP_TARGET_PROCESS_WII_U_MENU);
 WUPS_MUST_REPLACE_FOR_PROCESS(_SYSDirectlySwitchTo, WUPS_LOADER_LIBRARY_SYSAPP, _SYSDirectlySwitchTo, WUPS_FP_TARGET_PROCESS_WII_U_MENU);
+
+/* ---- ikonka i nazwa Aeroverse na wybranym przycisku ----
+ * Wii U Menu bierze ikonki gornych przyciskow z meta/iconTex.tga apletow (00050030/1001X?0A).
+ * Podmieniamy ten plik na wbudowana ikonke Aeroverse i nazwe w meta.xml. */
+
+/* 5 pierwszych cyfr dolnej czesci Title ID apletu dla wybranego przycisku, 0 = brak */
+static uint32_t targetApplet(void) {
+    switch (gMode) {
+        case MODE_TVII: return 0x10013;
+        case MODE_MIIVERSE: return 0x10016;
+        case MODE_DLMGR: return 0x10018;
+        case MODE_BROWSER: return 0x10012;
+        default: return 0;
+    }
+}
+
+static bool endsWithI(const char *s, const char *suf) {
+    size_t a = strlen(s), b = strlen(suf);
+    if (a < b) return false;
+    for (size_t i = 0; i < b; i++)
+        if (tolower((unsigned char) s[a - b + i]) != tolower((unsigned char) suf[i])) return false;
+    return true;
+}
+
+/* czy sciezka to iconTex.tga apletu, ktory podmieniamy */
+static bool isTargetIcon(const char *path) {
+    uint32_t t = targetApplet();
+    if (!t || !path || !endsWithI(path, "/iconTex.tga")) return false;
+    const char *p = strstr(path, "00050030/");
+    if (!p) return false;
+    char want[6];
+    snprintf(want, sizeof(want), "%05x", (unsigned) t);
+    for (int i = 0; i < 5; i++)
+        if (tolower((unsigned char) p[9 + i]) != want[i]) return false;
+    return true;
+}
+
+typedef struct { bool used; uint32_t pos; } FakeFile;
+static FakeFile gFake[4];
+
+static FakeFile *fakeFromHandle(FSFileHandle h) {
+    for (int i = 0; i < 4; i++)
+        if (gFake[i].used && (FSFileHandle)(uintptr_t) &gFake[i] == h) return &gFake[i];
+    return NULL;
+}
+
+DECL_FUNCTION(FSStatus, FSOpenFile, FSClient *client, FSCmdBlock *block, const char *path, const char *mode,
+              FSFileHandle *handle, FSErrorFlag errorMask) {
+    if (isTargetIcon(path) && handle) {
+        for (int i = 0; i < 4; i++) {
+            if (!gFake[i].used) {
+                gFake[i].used = true;
+                gFake[i].pos  = 0;
+                *handle       = (FSFileHandle)(uintptr_t) &gFake[i];
+                return FS_STATUS_OK;
+            }
+        }
+    }
+    return real_FSOpenFile(client, block, path, mode, handle, errorMask);
+}
+
+DECL_FUNCTION(FSStatus, FSReadFile, FSClient *client, FSCmdBlock *block, uint8_t *buffer, uint32_t size,
+              uint32_t count, FSFileHandle handle, uint32_t unk1, FSErrorFlag errorMask) {
+    FakeFile *f = fakeFromHandle(handle);
+    if (f) {
+        if (size == 0) return (FSStatus) 0;
+        uint32_t left = icon_tga_size - f->pos;
+        uint32_t want = size * count;
+        if (want > left) want = left;
+        want -= want % size;
+        memcpy(buffer, icon_tga + f->pos, want);
+        f->pos += want;
+        return (FSStatus)(want / size);
+    }
+    return real_FSReadFile(client, block, buffer, size, count, handle, unk1, errorMask);
+}
+
+DECL_FUNCTION(FSStatus, FSCloseFile, FSClient *client, FSCmdBlock *block, FSFileHandle handle, FSErrorFlag errorMask) {
+    FakeFile *f = fakeFromHandle(handle);
+    if (f) {
+        f->used = false;
+        return FS_STATUS_OK;
+    }
+    return real_FSCloseFile(client, block, handle, errorMask);
+}
+
+static void setName(char *dst, size_t n) { strncpy(dst, "Aeroverse", n - 1); dst[n - 1] = 0; }
+
+DECL_FUNCTION(int32_t, ACPGetTitleMetaXmlByDevice, uint32_t upper, uint32_t lower, ACPMetaXml *out, uint32_t device, uint32_t u1) {
+    int32_t res = real_ACPGetTitleMetaXmlByDevice(upper, lower, out, device, u1);
+    uint32_t t  = targetApplet();
+    if (res == 0 && out && t && upper == 0x00050030 && (lower >> 12) == t) {
+        char *ln = out->longname_ja, *sn = out->shortname_ja;
+        for (int i = 0; i < 12; i++) {
+            setName(ln + i * 512, 512);
+            setName(sn + i * 256, 256);
+        }
+    }
+    return res;
+}
+
+WUPS_MUST_REPLACE_FOR_PROCESS(FSOpenFile, WUPS_LOADER_LIBRARY_COREINIT, FSOpenFile, WUPS_FP_TARGET_PROCESS_WII_U_MENU);
+WUPS_MUST_REPLACE_FOR_PROCESS(FSReadFile, WUPS_LOADER_LIBRARY_COREINIT, FSReadFile, WUPS_FP_TARGET_PROCESS_WII_U_MENU);
+WUPS_MUST_REPLACE_FOR_PROCESS(FSCloseFile, WUPS_LOADER_LIBRARY_COREINIT, FSCloseFile, WUPS_FP_TARGET_PROCESS_WII_U_MENU);
+WUPS_MUST_REPLACE_FOR_PROCESS(ACPGetTitleMetaXmlByDevice, WUPS_LOADER_LIBRARY_NN_ACP, ACPGetTitleMetaXmlByDevice, WUPS_FP_TARGET_PROCESS_WII_U_MENU);
